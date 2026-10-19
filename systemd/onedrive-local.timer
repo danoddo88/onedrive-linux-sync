@@ -1,0 +1,10 @@
+[Unit]
+Description=Revisar cada minuto las carpetas guardadas en esta PC
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

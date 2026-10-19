@@ -1,0 +1,12 @@
+[Unit]
+Description=Cola rapida: sube al instante lo que cambia en esta PC
+After=onedrive.service
+
+[Service]
+ExecStart=/usr/local/bin/onedrive-cola
+Restart=always
+RestartSec=15
+Nice=0
+
+[Install]
+WantedBy=default.target

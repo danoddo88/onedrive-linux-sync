@@ -1,0 +1,31 @@
+#!/bin/bash
+# Monta cada carpeta guardada en esta PC ENCIMA de su lugar en ~/OneDrive,
+# para que haya una sola carpeta visible. Lo llama onedrive.service al
+# arrancar y al parar, y onedrive-local al fijar o soltar una carpeta.
+#   onedrive-bind montar    [carpeta]
+#   onedrive-bind desmontar [carpeta]
+set -u
+# Corre como root (sudo). Usa la carpeta personal del usuario que lo llamo.
+U="${SUDO_USER:-$USER}"
+H="$(getent passwd "$U" | cut -d: -f6)"
+[ -n "$H" ] || { echo "no se pudo determinar la carpeta personal de $U" >&2; exit 1; }
+LOCAL=$H/.onedrive-local
+NUBE=$H/OneDrive
+FIJADAS=$H/.config/onedrive-sync/fijadas.conf
+una() {
+    local R="$1"
+    case "${2}" in
+      montar)
+        [ -d "$LOCAL/$R" ] || return 0
+        mkdir -p "$NUBE/$R" 2>/dev/null
+        mountpoint -q "$NUBE/$R" && return 0
+        mount --bind -o x-gvfs-hide "$LOCAL/$R" "$NUBE/$R" && logger -t onedrive-bind "montada $R" ;;
+      desmontar)
+        mountpoint -q "$NUBE/$R" || return 0
+        umount "$NUBE/$R" && logger -t onedrive-bind "desmontada $R" ;;
+    esac
+}
+if [ -n "${2:-}" ]; then una "$2" "$1"; else
+    [ -f "$FIJADAS" ] || exit 0
+    while IFS= read -r R; do [ -n "$R" ] && una "$R" "$1"; done < "$FIJADAS"
+fi

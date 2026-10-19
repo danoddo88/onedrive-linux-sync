@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Dejar de guardar en esta PC
+Comment=Deja de sincronizar. Conserva la copia local y la de la nube.
+Exec=/usr/local/bin/onedrive-local --soltar %F
+Icon-Name=folder-visiting
+Selection=s
+Extensions=dir

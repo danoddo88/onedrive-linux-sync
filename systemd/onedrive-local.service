@@ -1,0 +1,10 @@
+[Unit]
+Description=Sincronizar en los dos sentidos las carpetas guardadas en esta PC
+After=onedrive.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/onedrive-local --ahora
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3600

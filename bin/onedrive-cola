@@ -1,0 +1,80 @@
+#!/bin/bash
+# =============================================================================
+#  COLA DE SUBIDA  --  dos trabajos separados, con sala de espera en el medio
+#
+#    ANOTADOR    escucha al nucleo y deja un papelito por cada archivo que
+#                cambio. Nunca se bloquea, nunca pierde un aviso, ni siquiera
+#                mientras la revision de fondo esta trabajando.
+#
+#    REPARTIDOR  vacia la sala de espera de golpe y sube de a 4 en paralelo.
+#                Si la revision de fondo corre, espera; los papelitos se
+#                siguen juntando.
+#
+#  El papelito se llama como el camino del archivo, asi que si el mismo
+#  archivo cambia diez veces seguidas queda un solo papelito.
+#
+#  set -u y la comprobacion de RT evitan que un borrado con una variable
+#  vacia apunte a la raiz del disco.
+# =============================================================================
+set -u
+LOCAL="$HOME/.onedrive-local"
+REGISTRO="$HOME/.config/onedrive-sync/historial-cola.log"
+RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; : "${RT:?}"
+ENTRADA="$RT/onedrive-cola/entrada"
+PROCESO="$RT/onedrive-cola/proceso"
+BANDERA="$RT/onedrive-revision-en-curso"
+LOTE="$RT/onedrive-cola/lote.txt"
+EN_CURSO="$HOME/.config/onedrive-sync/en-curso.conf"
+PARALELO=4
+
+mkdir -p "$LOCAL" "$HOME/.config/onedrive-sync" "$ENTRADA"
+anotar() { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
+anotar "cola iniciada (hasta $PARALELO subidas en paralelo)"
+
+# ---- ANOTADOR -------------------------------------------------------------
+(
+  inotifywait -m -r -q -e close_write -e moved_to --format "%w%f" \
+      --exclude '(\.goutputstream|\.swp$|\.tmp$|~$|/\.git/)' "$LOCAL" 2>/dev/null |
+  while IFS= read -r A; do
+      [ -f "$A" ] || continue
+      REL="${A#$LOCAL/}"
+      [ "$REL" = "$A" ] && continue
+      # Lo que esta bajando "Mantener siempre en esta PC" viene de la nube:
+      # no hay que subirlo de vuelta. Sin esto, cada archivo descargado volvia
+      # a la nube y saturaba la conexion (2026-10-19: 22.000 avisos de mas).
+      if [ -s "$EN_CURSO" ]; then
+          SALTAR=0
+          while IFS= read -r F; do
+              [ -n "$F" ] && case "$REL" in "$F"/*) SALTAR=1; break ;; esac
+          done < "$EN_CURSO"
+          [ "$SALTAR" = 1 ] && continue
+      fi
+      NOMBRE=$(printf "%s" "$REL" | md5sum | cut -d" " -f1)
+      printf "%s" "$REL" > "$ENTRADA/$NOMBRE" 2>/dev/null
+  done
+) &
+trap 'kill %1 2>/dev/null' EXIT
+
+# ---- REPARTIDOR -----------------------------------------------------------
+while true; do
+    if [ -e "$BANDERA" ]; then sleep 2; continue; fi
+    if [ -z "$(ls -A "$ENTRADA" 2>/dev/null)" ]; then sleep 1; continue; fi
+
+    # Rotacion atomica: lo que llegue de ahora en mas cae en una entrada nueva
+    rmdir "$PROCESO" 2>/dev/null
+    mv "$ENTRADA" "$PROCESO" 2>/dev/null || { sleep 1; continue; }
+    mkdir -p "$ENTRADA"
+
+    : > "$LOTE"
+    for F in "$PROCESO"/*; do
+        [ -f "$F" ] || continue
+        R=$(cat "$F" 2>/dev/null)
+        [ -n "$R" ] && printf "%s\n" "$R" >> "$LOTE"
+    done
+    find "$PROCESO" -maxdepth 1 -type f -delete
+    rmdir "$PROCESO" 2>/dev/null
+
+    N=$(wc -l < "$LOTE")
+    [ "$N" -gt 1 ] && anotar "lote de $N archivos, de a $PARALELO en paralelo"
+    [ "$N" -gt 0 ] && xargs -a "$LOTE" -d "\n" -P "$PARALELO" -I{} /usr/local/bin/onedrive-subir-uno "{}"
+done

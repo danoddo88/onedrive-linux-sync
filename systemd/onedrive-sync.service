@@ -1,0 +1,9 @@
+[Unit]
+Description=Subir a OneDrive las carpetas marcadas
+After=onedrive.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/onedrive-sincronizar --ahora
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,89 @@
+#!/bin/bash
+# =============================================================================
+#  MARCAS EN VIVO  --  marca solo la carpeta que tenes abierta
+#
+#  Una vez por segundo mira que ventana esta activa. Si es el explorador
+#  (Nemo o Thunar) y
+#  esta mostrando una carpeta de ~/OneDrive que no se marco hace poco, pone
+#  la marca a cada archivo y subcarpeta de ESE nivel:
+#     tilde verde   esta en esta PC (carpeta guardada, o adentro de una)
+#     globo         solo en la nube
+#  Si cambio alguna marca, recarga la ventana (Ctrl+R; F5 no relee las marcas), porque el explorador no
+#  se entera solo de que una marca cambio.
+#
+#  No recorre todo OneDrive: solo lo que miras, cuando lo miras.
+# =============================================================================
+set -u
+NUBE="$HOME/OneDrive"
+FIJADAS="$HOME/.config/onedrive-sync/fijadas.conf"
+VIGENCIA=60           # segundos antes de volver a revisar la misma carpeta
+declare -A VISTA      # carpeta -> momento en que se marco
+
+EN_CURSO="$HOME/.config/onedrive-sync/en-curso.conf"
+
+LOCAL="$HOME/.onedrive-local"
+
+marca_deseada() {     # $1 = ruta relativa dentro de OneDrive, $2 = ruta absoluta
+    local R="$1" A="$2" F
+    # 1. guardada (o adentro de una guardada): tilde
+    while IFS= read -r F; do
+        [ -n "$F" ] || continue
+        case "$R" in "$F"|"$F"/*) echo emblem-default; return ;; esac
+    done < "$FIJADAS"
+    # 2. bajando ahora mismo: flechas
+    if [ -f "$EN_CURSO" ]; then
+        while IFS= read -r F; do
+            [ -n "$F" ] || continue
+            case "$R" in
+              "$F"|"$F"/*)
+                # Un archivo que ya existe con su nombre final en la copia local
+                # esta completo (rclone baja a un temporal y lo renombra al final).
+                # Las carpetas quedan con flechas hasta que termina todo.
+                if [ ! -d "$A" ] && [ -f "$LOCAL/$R" ]; then echo emblem-default
+                else echo emblem-synchronizing; fi
+                return ;;
+            esac
+        done < "$EN_CURSO"
+    fi
+    # 3. el resto: solo en la nube
+    echo emblem-web
+}
+
+marcar_carpeta() {    # $1 = carpeta absoluta; imprime cuantas marcas cambio
+    local D="$1" CAMBIOS=0 A REL QUIERO TIENE
+    while IFS= read -r -d "" A; do
+        REL="${A#$NUBE/}"
+        QUIERO=$(marca_deseada "$REL" "$A")
+        TIENE=$(gio info -a metadata::emblems "$A" 2>/dev/null | grep -o "emblem-[a-z]*" | head -1)
+        if [ "$TIENE" != "$QUIERO" ]; then
+            gio set -t stringv "$A" metadata::emblems "$QUIERO" 2>/dev/null && CAMBIOS=$((CAMBIOS+1))
+        fi
+    done < <(find "$D" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    echo "$CAMBIOS"
+}
+
+ANTERIOR=""
+while true; do
+    sleep 1
+    W=$(xdotool getactivewindow 2>/dev/null) || continue
+    xprop -id "$W" WM_CLASS 2>/dev/null | grep -qiE "thunar|nemo" || { ANTERIOR=""; continue; }
+    T=$(xdotool getwindowname "$W" 2>/dev/null)
+    # Thunar: "/ruta - Thunar".  Nemo: "carpeta - /ruta" (un nombre no puede tener "/").
+    case "$T" in *" - Thunar") D="${T% - Thunar}" ;; *) D="/${T#*/}" ;; esac
+    case "$D" in "$NUBE"|"$NUBE"/*) ;; *) ANTERIOR=""; continue ;; esac
+    AHORA=$(date +%s)
+    # Carpeta nueva: revisar ya (salvo que se haya visto hace menos de VIGENCIA).
+    # Misma carpeta: volver a revisarla cada VIGENCIA, para que se vean los
+    # cambios mientras la tenes abierta (por ejemplo, una descarga avanzando).
+    [ $(( AHORA - ${VISTA[$D]:-0} )) -lt $VIGENCIA ] && { ANTERIOR="$D"; continue; }
+    ANTERIOR="$D"
+    VISTA[$D]=$AHORA
+    N=$(marcar_carpeta "$D")
+    if [ "$N" -gt 0 ]; then
+        logger -t onedrive-marcas "$N marcas nuevas en ${D#$NUBE/}"
+        # recargar solo si esa ventana sigue activa y en la misma carpeta
+        [ "$(xdotool getactivewindow 2>/dev/null)" = "$W" ] && \
+        [ "$(xdotool getwindowname "$W" 2>/dev/null)" = "$T" ] && \
+            xdotool key --clearmodifiers ctrl+r
+    fi
+done

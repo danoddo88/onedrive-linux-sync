@@ -1,0 +1,27 @@
+[Unit]
+Description=OneDrive montado con rclone (bajo demanda + copias locales)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/rclone mount onedrive: %h/OneDrive \
+  --allow-other \
+  --vfs-cache-mode full \
+  --vfs-cache-max-size 250G \
+  --vfs-cache-max-age 8760h \
+  --vfs-cache-poll-interval 5m \
+  --cache-dir %h/.cache/rclone \
+  --dir-cache-time 168h \
+  --poll-interval 1m \
+  --umask 022 \
+  --log-level INFO \
+  --log-file %h/.cache/rclone/mount.log
+ExecStartPost=/usr/bin/sudo /usr/local/sbin/onedrive-bind montar
+ExecStop=/usr/bin/sudo /usr/local/sbin/onedrive-bind desmontar
+ExecStop=/bin/fusermount3 -uz %h/OneDrive
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

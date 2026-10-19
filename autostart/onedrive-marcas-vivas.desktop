@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=OneDrive: marcas de estado
+Comment=Pone el tilde verde / nube / flechas en la carpeta abierta
+Exec=/usr/local/bin/onedrive-marcas-vivas
+X-GNOME-Autostart-enabled=true

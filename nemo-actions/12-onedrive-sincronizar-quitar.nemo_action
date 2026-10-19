@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Dejar de sincronizar con OneDrive
+Comment=Deja de subir esta carpeta. No borra nada.
+Exec=/usr/local/bin/onedrive-sincronizar --quitar %F
+Icon-Name=edit-delete
+Selection=s
+Extensions=dir

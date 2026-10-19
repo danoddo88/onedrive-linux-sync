@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Sincronizar esta copia ahora
+Comment=Sincroniza ya, sin esperar
+Exec=/usr/local/bin/onedrive-local --ahora %F
+Icon-Name=folder-sync
+Selection=s
+Extensions=dir

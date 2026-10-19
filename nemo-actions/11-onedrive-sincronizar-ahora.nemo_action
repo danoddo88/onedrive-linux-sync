@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Sincronizar con OneDrive ahora
+Comment=Sube los cambios de esta carpeta en este momento
+Exec=/usr/local/bin/onedrive-sincronizar --ahora %F
+Icon-Name=view-refresh
+Selection=s
+Extensions=dir

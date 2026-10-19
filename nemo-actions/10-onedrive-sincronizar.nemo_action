@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Mantener sincronizada con OneDrive
+Comment=Sube esta carpeta a OneDrive y la mantiene al dia cada 10 minutos
+Exec=/usr/local/bin/onedrive-sincronizar --registrar %F
+Icon-Name=folder-remote
+Selection=s
+Extensions=dir

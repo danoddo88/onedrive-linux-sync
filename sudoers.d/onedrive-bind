@@ -1,0 +1,2 @@
+# El montaje bind necesita root; nada mas.
+__USER__ ALL=(root) NOPASSWD: /usr/local/sbin/onedrive-bind

@@ -1,0 +1,80 @@
+#!/bin/bash
+# =============================================================================
+#  TILDES DE ESTADO  --  el equivalente al tilde verde de Windows
+#
+#  Linux no trae estados de sincronizacion, pero el explorador de archivos sabe
+#  dibujar un emblema chiquito sobre cualquier icono. Esto los pone.
+#
+#    tilde verde   el archivo esta en esta PC, listo para abrir al instante
+#    nube          el archivo vive solo en OneDrive, se baja al abrirlo
+#    flechas       sincronizando en este momento
+#
+#  Uso:
+#    onedrive-tildes --aplicar              repasa todo
+#    onedrive-tildes --uno <archivo> local|nube|sincronizando
+# =============================================================================
+set -u
+LOCAL="$HOME/.onedrive-local"
+NUBE="$HOME/OneDrive"
+FIJADAS="$HOME/.config/onedrive-sync/fijadas.conf"
+PARALELO=8
+
+emblema() {
+    case "$1" in
+        local)         echo "emblem-default" ;;
+        nube)          echo "emblem-web" ;;
+        sincronizando) echo "emblem-synchronizing" ;;
+        sincronizado)  echo "emblem-synchronized" ;;
+        *)             echo "emblem-default" ;;
+    esac
+}
+
+case "${1:-}" in
+  --uno)
+    A="${2:?falta el archivo}"
+    gio set -t stringv "$A" metadata::emblems "$(emblema "${3:-local}")" 2>/dev/null
+    ;;
+
+  --aplicar)
+    I=$(date +%s)
+
+    # 1. Todo lo que esta bajado: tilde verde
+    if [ -d "$LOCAL" ]; then
+        find "$LOCAL" -mindepth 1 -print0 2>/dev/null |
+          xargs -0 -r -P "$PARALELO" -I{} gio set -t stringv "{}" metadata::emblems emblem-default 2>/dev/null
+    fi
+
+    # 1b. Las carpetas fijadas tambien se ven por ~/OneDrive/<carpeta> (montaje
+    #     bind). Las marcas van por punto de montaje, asi que hay que ponerlas
+    #     tambien por esa ruta, que es la que se usa.
+    while IFS= read -r R; do
+        [ -n "$R" ] && [ -d "$NUBE/$R" ] || continue
+        # el icono de la carpeta misma (si esta anidada, el paso 2 no la ve)
+        gio set -t stringv "$NUBE/$R" metadata::emblems emblem-default 2>/dev/null
+        find "$NUBE/$R" -mindepth 1 -print0 2>/dev/null |
+          xargs -0 -r -P "$PARALELO" -I{} gio set -t stringv "{}" metadata::emblems emblem-default 2>/dev/null
+    done < "$FIJADAS"
+
+    # 2. En la ventana a la nube: cada carpeta de primer nivel
+    if [ -d "$NUBE" ]; then
+        for D in "$NUBE"/*; do
+            [ -e "$D" ] || continue
+            NOMBRE="$(basename "$D")"
+            if grep -qxF "$NOMBRE" "$FIJADAS" 2>/dev/null; then
+                gio set -t stringv "$D" metadata::emblems emblem-default 2>/dev/null
+            else
+                gio set -t stringv "$D" metadata::emblems emblem-web 2>/dev/null
+            fi
+        done
+    fi
+
+    N=$(find "$LOCAL" -mindepth 1 2>/dev/null | wc -l)
+    echo "$(date "+%F %T")  tildes aplicados a $N elementos en $(( $(date +%s) - I ))s" \
+        >> "$HOME/.config/onedrive-sync/historial-cola.log"
+    echo "Tildes aplicados a $N elementos en $(( $(date +%s) - I )) segundos."
+    ;;
+
+  *)
+    sed -n '2,14p' "$0" | sed 's/^# \{0,2\}//'
+    ;;
+esac

@@ -1,0 +1,26 @@
+#!/bin/bash
+# Sube un archivo suelto a OneDrive. Lo llama la cola, varios a la vez.
+set -u
+LOCAL="$HOME/.onedrive-local"
+REGISTRO="$HOME/.config/onedrive-sync/historial-cola.log"
+ENTRADA="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/onedrive-cola/entrada"
+REL="$1"
+A="$LOCAL/$REL"
+[ -f "$A" ] || exit 0
+I=$(date +%s%3N)
+if rclone copyto "$A" "onedrive:$REL" --no-traverse --log-level ERROR 2>>"$REGISTRO"; then
+    echo "$(date "+%F %T")  SUBIDO en $(( $(date +%s%3N) - I )) ms: $REL" >> "$REGISTRO"
+    # tilde verde: ya esta en esta PC y ya esta en la nube
+    gio set -t stringv "$A" metadata::emblems emblem-default 2>/dev/null
+    # y tambien por la ruta unificada, que es la que se ve
+    [ -e "$HOME/OneDrive/$REL" ] && gio set -t stringv "$HOME/OneDrive/$REL" metadata::emblems emblem-default 2>/dev/null
+else
+    echo "$(date "+%F %T")  FALLO (reintento en 15 s): $REL" >> "$REGISTRO"
+    # Marcar como pendiente (flechas) donde el usuario lo ve
+    [ -e "$HOME/OneDrive/$REL" ] && gio set -t stringv "$HOME/OneDrive/$REL" metadata::emblems emblem-synchronizing 2>/dev/null
+    # Devolver el papelito a la sala de espera: el repartidor lo volvera a
+    # intentar. Sin esto, un archivo guardado sin internet se perdia de la cola.
+    sleep 15
+    mkdir -p "$ENTRADA"
+    printf "%s" "$REL" > "$ENTRADA/$(printf "%s" "$REL" | md5sum | cut -d" " -f1)"
+fi

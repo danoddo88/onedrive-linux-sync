@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Mantener siempre en esta PC
+Comment=Baja esta carpeta de OneDrive al disco y la mantiene al dia en los dos sentidos
+Exec=/usr/local/bin/onedrive-local --fijar %F
+Icon-Name=folder-download
+Selection=s
+Extensions=dir

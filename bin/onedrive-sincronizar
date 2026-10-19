@@ -1,0 +1,117 @@
+#!/bin/bash
+# =============================================================================
+#  Mantiene carpetas locales subidas a OneDrive.
+#
+#  Sentido UNICO: lo local manda, se sube a la nube. Nada se baja.
+#  Lo que se borra o se pisa en la nube NO se pierde: va a una carpeta
+#  "_reemplazados/<fecha>" dentro del destino.
+#
+#  Uso:
+#    onedrive-sincronizar --registrar /ruta/carpeta   (lo llama Thunar)
+#    onedrive-sincronizar --quitar    /ruta/carpeta
+#    onedrive-sincronizar --ahora     [/ruta/carpeta] (sin ruta: todas)
+#    onedrive-sincronizar --lista
+# =============================================================================
+set -u
+CONF="$HOME/.config/onedrive-sync"
+LISTA="$CONF/carpetas.conf"
+REGISTRO="$CONF/historial.log"
+mkdir -p "$CONF"; touch "$LISTA"
+
+grafico() { [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null; }
+aviso()   { grafico && notify-send -i folder-remote "OneDrive" "$1" 2>/dev/null; echo "$1"; }
+error()   { grafico && zenity --error --text="$1" --width=400 2>/dev/null; echo "ERROR: $1" >&2; exit 1; }
+anotar()  { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
+
+destino_de() { grep -F "|" "$LISTA" | awk -F"|" -v c="$1" "\$1==c {print \$2}" | head -1; }
+
+sincronizar_una() {
+    local LOCAL="$1" DEST="$2"
+    [ -d "$LOCAL" ] || { anotar "SALTEADA (no existe): $LOCAL"; return 1; }
+    # La papelera va FUERA del destino: rclone no acepta que se superpongan.
+    local PAPELERA="_reemplazados-$(hostname)/$(basename "$DEST")/$(date +%F)"
+    anotar "sincronizando $LOCAL -> onedrive:$DEST"
+    if rclone sync "$LOCAL" "onedrive:$DEST" \
+         --backup-dir "onedrive:$PAPELERA" \
+         --create-empty-src-dirs \
+         --exclude ".Trash-*/**" --exclude "*.tmp" --exclude ".~*" \
+         --transfers 4 --checkers 8 \
+         --log-file "$REGISTRO" --log-level INFO; then
+        anotar "OK: $LOCAL"; return 0
+    else
+        anotar "FALLO: $LOCAL"; return 1
+    fi
+}
+
+case "${1:-}" in
+  --registrar)
+    LOCAL="$(realpath "${2:?falta la carpeta}")"
+    [ -d "$LOCAL" ] || error "Eso no es una carpeta."
+    case "$LOCAL" in
+      "$HOME/OneDrive"*) error "Esa carpeta YA es OneDrive.\n\nNo tiene sentido sincronizarla consigo misma." ;;
+    esac
+    if [ -n "$(destino_de "$LOCAL")" ]; then
+        error "Esa carpeta ya está sincronizada.\n\nDestino: $(destino_de "$LOCAL")"
+    fi
+    SUGERIDO="$(hostname)/$(basename "$LOCAL")"
+    if grafico; then
+        DEST=$(zenity --entry --width=520 \
+            --title="Mantener sincronizada con OneDrive" \
+            --text="Se subirá «$(basename "$LOCAL")» a tu OneDrive, y se mantendrá al día cada 10 minutos.\n\nLo local manda: esta carpeta nunca se modifica.\n\n¿En qué carpeta de OneDrive la guardo?" \
+            --entry-text="$SUGERIDO") || exit 0
+    else
+        DEST="${3:-$SUGERIDO}"
+    fi
+    [ -n "$DEST" ] || exit 0
+    DEST="${DEST#/}"; DEST="${DEST%/}"
+    echo "$LOCAL|$DEST" >> "$LISTA"
+    anotar "REGISTRADA $LOCAL -> $DEST"
+    aviso "Sincronizando «$(basename "$LOCAL")» por primera vez..."
+    if sincronizar_una "$LOCAL" "$DEST"; then
+        aviso "«$(basename "$LOCAL")» ya está en OneDrive, en $DEST"
+    else
+        grafico && zenity --error --width=460 --text="No se pudo subir.\n\nDetalle en: $REGISTRO"
+    fi
+    systemctl --user start onedrive-sync.timer 2>/dev/null
+    ;;
+
+  --quitar)
+    LOCAL="$(realpath "${2:?falta la carpeta}")"
+    D="$(destino_de "$LOCAL")"
+    [ -n "$D" ] || error "Esa carpeta no estaba sincronizada."
+    if grafico; then
+        zenity --question --width=460 \
+          --title="Dejar de sincronizar" \
+          --text="Dejar de subir «$(basename "$LOCAL")» a OneDrive.\n\nLo que ya está en la nube NO se borra.\nLos archivos locales NO se tocan." || exit 0
+    fi
+    # Ojo: grep -v devuelve 1 cuando no queda ninguna linea, asi que no se
+    # puede encadenar con &&: borraria la ultima carpeta sin guardar el cambio.
+    grep -vF "$LOCAL|" "$LISTA" > "$LISTA.tmp" || true
+    mv "$LISTA.tmp" "$LISTA"
+    anotar "QUITADA $LOCAL"
+    aviso "«$(basename "$LOCAL")» ya no se sincroniza."
+    ;;
+
+  --ahora)
+    if [ -n "${2:-}" ]; then
+        LOCAL="$(realpath "$2")"; D="$(destino_de "$LOCAL")"
+        [ -n "$D" ] || error "Esa carpeta no está sincronizada.\n\nUsá «Mantener sincronizada con OneDrive» primero."
+        aviso "Sincronizando «$(basename "$LOCAL")»..."
+        sincronizar_una "$LOCAL" "$D" && aviso "«$(basename "$LOCAL")» al día." \
+            || { grafico && zenity --error --width=460 --text="Falló. Detalle en $REGISTRO"; }
+    else
+        while IFS="|" read -r L D; do
+            [ -n "$L" ] || continue
+            sincronizar_una "$L" "$D"
+        done < "$LISTA"
+    fi
+    ;;
+
+  --lista)
+    if [ ! -s "$LISTA" ]; then echo "No hay carpetas sincronizadas."; exit 0; fi
+    printf "%-45s  %s\n" "CARPETA LOCAL" "DESTINO EN ONEDRIVE"
+    while IFS="|" read -r L D; do [ -n "$L" ] && printf "%-45s  %s\n" "$L" "$D"; done < "$LISTA"
+    ;;
+
+  *) sed -n "2,16p" "$0" | sed "s/^# \{0,2\}//" ;;
+esac

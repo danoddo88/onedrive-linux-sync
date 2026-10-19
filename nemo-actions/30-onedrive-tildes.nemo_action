@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Actualizar los tildes de estado
+Comment=Repasa que archivos estan en esta PC y cuales solo en la nube
+Exec=/usr/local/bin/onedrive-tildes --aplicar
+Icon-Name=emblem-default
+Selection=any
+Extensions=any

@@ -1,0 +1,186 @@
+#!/bin/bash
+# =============================================================================
+#  "Mantener siempre en esta PC"  --  copia local real, en los dos sentidos
+#
+#  Baja la carpeta entera a ~/.onedrive-local/<carpeta>. Son archivos de
+#  verdad en el disco: se leen al instante, sin esperar a internet.
+#
+#  La sincronizacion es BIDIRECCIONAL y automatica cada 5 minutos:
+#    - lo que cambies en esta PC sube a la nube
+#    - lo que cambies en otro dispositivo baja a esta PC
+#  Si un archivo cambio en los dos lados, gana el mas reciente.
+#
+#  Uso:
+#    onedrive-local --fijar   ~/OneDrive/carpeta
+#    onedrive-local --soltar  ~/OneDrive/carpeta
+#    onedrive-local --ahora   [carpeta]
+#    onedrive-local --lista
+# =============================================================================
+set -u
+RAIZ="$HOME/OneDrive"
+LOCAL="$HOME/.onedrive-local"
+CONF="$HOME/.config/onedrive-sync"
+FIJADAS="$CONF/fijadas.conf"
+REGISTRO="$CONF/historial-local.log"
+mkdir -p "$CONF" "$LOCAL"; touch "$FIJADAS"
+
+grafico() { [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null; }
+aviso()   { grafico && notify-send -i folder-download "OneDrive" "$1" 2>/dev/null; echo "$1"; }
+error()   { grafico && zenity --error --width=440 --text="$1" 2>/dev/null; echo "ERROR: $1" >&2; exit 1; }
+anotar()  { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
+
+OPC="--transfers 8 --checkers 8 --conflict-resolve newer --resilient --recover
+     --create-empty-src-dirs --exclude .Trash-*/** --exclude *.tmp
+     --log-file $REGISTRO --log-level INFO"
+
+# Bandera que le dice a la cola rapida que se quede quieta mientras
+# comparamos. Sin esto, la cola volveria a subir todo lo que acabamos de bajar.
+BANDERA="${XDG_RUNTIME_DIR:-/tmp}/onedrive-revision-en-curso"
+
+sincronizar() {
+    local L="$1" R="$2" EXTRA="${3:-}" RES=0
+    touch "$BANDERA"
+    rclone bisync "$L" "onedrive:$R" $OPC $EXTRA || RES=$?
+    # Si una corrida anterior aborto (por ejemplo, sin internet), bisync pierde
+    # sus listas y se niega a seguir hasta una resincronizacion. La hacemos
+    # solos, con la regla de que gana el archivo mas nuevo de cada lado, asi
+    # no se pisa nada que se haya editado desde otro dispositivo durante el corte.
+    # Dos revisiones a la vez no pueden correr: bisync deja un bloqueo. Si
+    # chocamos con una en curso, no es un fallo: la otra esta haciendo el trabajo.
+    if [ "$RES" -ne 0 ] && tail -15 "$REGISTRO" 2>/dev/null | grep -q "prior lock file found"; then
+        anotar "SALTEADA $R: ya hay otra revision en curso"
+        sleep 2; rm -f "$BANDERA"; return 0
+    fi
+    if [ "$RES" -ne 0 ] && [ -z "$EXTRA" ] && tail -40 "$REGISTRO" 2>/dev/null | grep -qE "cannot find prior Path1 or Path2 listings|Must run --resync to recover"; then
+        anotar "RECUPERANDO $R: resincronizacion (gana el mas nuevo)"
+        RES=0
+        rclone bisync "$L" "onedrive:$R" $OPC --resync --resync-mode newer || RES=$?
+        [ "$RES" -eq 0 ] && anotar "RECUPERADA $R" || anotar "NO SE PUDO RECUPERAR $R"
+    fi
+    # Margen de 2 segundos: los avisos del nucleo llegan con retraso y sin
+    # esta pausa la cola alcanzaria a ver los archivos recien bajados.
+    sleep 2
+    rm -f "$BANDERA"
+    # (las marcas las mantiene onedrive-marcas-vivas, en la carpeta que miras)
+    return $RES
+}
+
+case "${1:-}" in
+  --fijar)
+    C="$(realpath "${2:?falta la carpeta}")"
+    [ -d "$C" ] || error "Eso no es una carpeta."
+    case "$C/" in
+      "$RAIZ/"*) : ;;
+      *) error "Esta opción es para carpetas de dentro de ~/OneDrive.\n\nPara SUBIR una carpeta propia a la nube, usá\n«Mantener sincronizada con OneDrive»." ;;
+    esac
+    RUTA="${C#$RAIZ/}"
+    DESTINO="$LOCAL/$RUTA"
+    grep -qxF "$RUTA" "$FIJADAS" && error "«$(basename "$C")» ya está guardada en esta PC:\n\n$DESTINO"
+
+    # Medir una carpeta grande puede tardar minutos. Avisar enseguida, y no
+    # esperar mas de 45 s: sin esto, parecia que la opcion no habia hecho nada.
+    aviso "Calculando el tamaño de «$(basename "$C")»... (puede tardar hasta un minuto)"
+    TAM=$(timeout 45 rclone size "onedrive:$RUTA" --json 2>/dev/null | python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin); print(\"%.1f GB en %d archivos\" % (d[\"bytes\"]/1e9, d[\"count\"]))
+except Exception: print(\"muy grande para medirla rápido (más de 45 s)\")" 2>/dev/null)
+    LIBRE=$(df -BG --output=avail / | tail -1 | tr -d " G")
+
+    if grafico; then
+        zenity --question --width=480 \
+          --title="Mantener siempre en esta PC" \
+          --text="«$(basename "$C")» se descargará entera y quedará en:\n\n   $DESTINO\n\nTamaño: $TAM\nLibre en disco: ${LIBRE} GB\n\nDesde entonces se sincroniza sola cada 5 minutos, en\nlos DOS sentidos: lo que cambies acá sube, y lo que\ncambies en otro dispositivo baja.\n\n¿Descargar ahora?" || exit 0
+    fi
+
+    mkdir -p "$DESTINO"
+    # Flechas de sincronizacion mientras baja, como en Windows
+    gio set -t stringv "$C" metadata::emblems emblem-synchronizing 2>/dev/null
+    # anotarla como "en curso": las marcas en vivo le ponen flechas a todo su contenido
+    echo "$RUTA" >> "$CONF/en-curso.conf"
+    # De a una carpeta por vez y con pocas conexiones: con varias descargas
+    # grandes a la vez la linea se satura y abrir cualquier carpeta de
+    # ~/OneDrive tardaba minutos (3 carpetas x 16 = 48 conexiones).
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/onedrive-fijar.lock"
+    if ! flock -n 9; then
+        aviso "«$(basename "$C")» queda en espera: hay otra carpeta bajando. Empieza sola cuando termine."
+        anotar "EN ESPERA $RUTA (otra carpeta bajando)"
+        flock 9
+    fi
+    # Muchos hilos: con archivos chicos el limite es la espera de cada pedido,
+    # no la linea. Microsoft frena si se abusa; rclone espera y sigue solo.
+    # Se ajusta con la variable ONEDRIVE_HILOS (ver README).
+    HILOS="${ONEDRIVE_HILOS:-32}"
+    OPC="${OPC/--transfers 8 --checkers 8/--transfers $HILOS --checkers $HILOS}"
+    anotar "FIJANDO $RUTA -> $DESTINO ($TAM)"
+    aviso "Descargando «$(basename "$C")»... ($TAM)"
+    # Paso 1: copy de la nube a la PC. Compara carpeta por carpeta y baja lo
+    # que falta mientras sigue comparando (bisync, en cambio, lista todo antes
+    # de bajar nada). Es de un solo sentido: nunca sube ni borra en la nube.
+    # Si se corta, al retomarlo saltea lo que ya esta y sigue.
+    touch "$BANDERA"
+    rclone copy "onedrive:$RUTA" "$DESTINO" --transfers "$HILOS" --checkers "$HILOS" \
+        --create-empty-src-dirs --exclude ".Trash-*/**" --exclude "*.tmp" \
+        --log-file "$REGISTRO" --log-level INFO --stats 1m
+    anotar "COPIA INICIAL TERMINADA $RUTA (codigo $?); armando la sincronizacion"
+    # Paso 2: bisync una vez, para que quede en los dos sentidos. Ya esta todo
+    # bajado, asi que solo compara.
+    sincronizar "$DESTINO" "$RUTA" "--resync"; OKF=$?
+    exec 9>&-
+    grep -vxF "$RUTA" "$CONF/en-curso.conf" > "$CONF/en-curso.tmp" 2>/dev/null || true
+    mv "$CONF/en-curso.tmp" "$CONF/en-curso.conf"
+    if [ "$OKF" -eq 0 ]; then
+        echo "$RUTA" >> "$FIJADAS"
+        N=$(find "$DESTINO" -type f 2>/dev/null | wc -l)
+        anotar "OK $RUTA ($N archivos)"
+        sudo /usr/local/sbin/onedrive-bind montar "$RUTA"
+        /usr/local/bin/onedrive-tildes --aplicar >/dev/null 2>&1 &
+        aviso "«$(basename "$C")» lista: $N archivos, ya en esta PC"
+        systemctl --user start onedrive-local.timer 2>/dev/null
+    else
+        anotar "FALLO al fijar $RUTA"
+        gio set -t stringv "$C" metadata::emblems emblem-web 2>/dev/null
+        error "No se pudo descargar.\n\nDetalle en: $REGISTRO"
+    fi
+    ;;
+
+  --soltar)
+    C="${2:?falta la carpeta}"
+    RUTA="${C#$RAIZ/}"; RUTA="${RUTA#$LOCAL/}"; RUTA="${RUTA%/}"
+    grep -qxF "$RUTA" "$FIJADAS" || error "Esa carpeta no estaba guardada en esta PC."
+    if grafico; then
+        zenity --question --width=470 --title="Dejar de guardar en esta PC" \
+          --text="«$(basename "$C")» deja de sincronizarse.\n\nVuelve a verse solo desde la nube (se descarga al abrir).\n\nNada se borra en OneDrive. La copia local queda en\n~/.onedrive-local por si querés recuperarla." || exit 0
+    fi
+    sudo /usr/local/sbin/onedrive-bind desmontar "$RUTA"
+    grep -vxF "$RUTA" "$FIJADAS" > "$FIJADAS.tmp" || true
+    mv "$FIJADAS.tmp" "$FIJADAS"
+    anotar "SOLTADA $RUTA"
+    aviso "«$(basename "$C")» ya no se sincroniza."
+    ;;
+
+  --ahora)
+    if [ -n "${2:-}" ]; then
+        C="$2"; RUTA="${C#$RAIZ/}"; RUTA="${RUTA#$LOCAL/}"; RUTA="${RUTA%/}"
+        grep -qxF "$RUTA" "$FIJADAS" || error "Esa carpeta no está marcada."
+        aviso "Sincronizando «$(basename "$C")»..."
+        sincronizar "$LOCAL/$RUTA" "$RUTA" && aviso "«$(basename "$C")» al día."
+    else
+        while IFS= read -r R; do
+            [ -n "$R" ] || continue
+            sincronizar "$LOCAL/$R" "$R" || anotar "FALLO en $R"
+        done < "$FIJADAS"
+    fi
+    ;;
+
+  --lista)
+    [ -s "$FIJADAS" ] || { echo "Ninguna carpeta guardada en esta PC."; exit 0; }
+    printf "%-38s %10s  %s\n" "CARPETA" "ARCHIVOS" "COPIA LOCAL"
+    while IFS= read -r R; do
+        [ -n "$R" ] || continue
+        printf "%-38s %10s  %s\n" "$R" "$(find "$LOCAL/$R" -type f 2>/dev/null | wc -l)" "$LOCAL/$R"
+    done < "$FIJADAS"
+    echo; echo "Ocupan: $(du -sh "$LOCAL" 2>/dev/null | cut -f1)"
+    ;;
+
+  *) sed -n "2,16p" "$0" | sed "s/^# \{0,2\}//" ;;
+esac

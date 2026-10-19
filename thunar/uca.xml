@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<actions>
+<action>
+	<icon>folder-remote</icon>
+	<name>Mantener sincronizada con OneDrive</name>
+	<submenu></submenu>
+	<unique-id>1792393662758-10</unique-id>
+	<command>/usr/local/bin/onedrive-sincronizar --registrar %f</command>
+	<description>Sube esta carpeta a OneDrive y la mantiene al dia cada 10 minutos</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+<action>
+	<icon>view-refresh</icon>
+	<name>Sincronizar con OneDrive ahora</name>
+	<submenu></submenu>
+	<unique-id>1792393662758-11</unique-id>
+	<command>/usr/local/bin/onedrive-sincronizar --ahora %f</command>
+	<description>Sube los cambios de esta carpeta en este momento</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+<action>
+	<icon>edit-delete</icon>
+	<name>Dejar de sincronizar con OneDrive</name>
+	<submenu></submenu>
+	<unique-id>1792393662758-12</unique-id>
+	<command>/usr/local/bin/onedrive-sincronizar --quitar %f</command>
+	<description>Deja de subir esta carpeta. No borra nada.</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+<action>
+	<icon>folder-download</icon>
+	<name>Mantener siempre en esta PC</name>
+	<submenu></submenu>
+	<unique-id>1792395081411-30</unique-id>
+	<command>/usr/local/bin/onedrive-local --fijar %f</command>
+	<description>Baja esta carpeta de OneDrive al disco y la mantiene al dia en los dos sentidos</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+<action>
+	<icon>folder-sync</icon>
+	<name>Sincronizar esta copia ahora</name>
+	<submenu></submenu>
+	<unique-id>1792395081411-31</unique-id>
+	<command>/usr/local/bin/onedrive-local --ahora %f</command>
+	<description>Sincroniza ya, sin esperar los 5 minutos</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+<action>
+	<icon>folder-visiting</icon>
+	<name>Dejar de guardar en esta PC</name>
+	<submenu></submenu>
+	<unique-id>1792395081411-32</unique-id>
+	<command>/usr/local/bin/onedrive-local --soltar %f</command>
+	<description>Deja de sincronizar. Conserva la copia local y la de la nube.</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+<action>
+	<icon>emblem-default</icon>
+	<name>Actualizar los tildes de estado</name>
+	<submenu></submenu>
+	<unique-id>1792399244651-50</unique-id>
+	<command>/usr/local/bin/onedrive-tildes --aplicar</command>
+	<description>Repasa que archivos estan en esta PC y cuales solo en la nube</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+</actions>
