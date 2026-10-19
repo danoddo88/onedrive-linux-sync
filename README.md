@@ -38,6 +38,16 @@ Emblems are GIO metadata (`metadata::emblems`), which Nemo and Thunar draw. A sm
 - A file manager that draws GIO emblems: **Nemo** (recommended) or **Thunar**. Nautilus does not draw them.
 - X11 (the live emblem daemon reads the active window title with `xdotool`).
 
+## File manager
+
+**Nemo** is the recommended file manager: it draws the GIO emblems, has an editable path bar and tabs, and `install.sh` configures it for you (full path in the window title, "standard" icon size in list view — smaller icons don't show emblems — and no folder item counts or image thumbnails, which would otherwise download cloud files just to browse). Those are plain `gsettings` keys; change them back any time.
+
+**Thunar** works too: the actions go in `~/.config/Thunar/uca.xml` and the installer sets the window title to the full path.
+
+**Nautilus** (GNOME Files) does not draw emblems, so you get the right-click options but no ticks.
+
+Emblems used: `emblem-default` (green tick), `emblem-web` (cloud, online only), `emblem-synchronizing` (arrows). They look right with the Adwaita, Papirus and WhiteSur icon themes; other themes may draw them differently.
+
 ## Install
 
 ```bash

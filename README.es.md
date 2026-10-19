@@ -36,6 +36,16 @@ Las marcas son metadatos GIO (`metadata::emblems`), que Nemo y Thunar dibujan. U
 - Un explorador que dibuje emblemas GIO: **Nemo** (recomendado) o **Thunar**. Nautilus no los dibuja.
 - X11 (el demonio de marcas lee el título de la ventana activa con `xdotool`).
 
+## El explorador de archivos
+
+**Nemo** es el explorador recomendado: dibuja los emblemas GIO, tiene barra de ruta editable y pestañas, e `install.sh` lo deja configurado (ruta completa en el título de la ventana, íconos "standard" en la vista de lista —con íconos más chicos no muestra los emblemas— y sin conteo de elementos ni miniaturas, que bajarían archivos de la nube solo por mirar una carpeta). Son claves de `gsettings` normales; se pueden volver a cambiar cuando quieras.
+
+**Thunar** también anda: las acciones van en `~/.config/Thunar/uca.xml` y el instalador pone la ruta completa en el título.
+
+**Nautilus** (Archivos de GNOME) no dibuja emblemas: tenés las opciones del botón derecho pero no los tildes.
+
+Emblemas usados: `emblem-default` (tilde verde), `emblem-web` (nube, solo en línea), `emblem-synchronizing` (flechas). Se ven bien con los temas de íconos Adwaita, Papirus y WhiteSur; otros temas pueden dibujarlos distinto.
+
 ## Instalación
 
 ```bash

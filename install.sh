@@ -40,7 +40,16 @@ if command -v thunar >/dev/null; then
     fi
     xfconf-query -c thunar -p /misc-window-title-style -s THUNAR_WINDOW_TITLE_STYLE_FULL_PATH_WITH_THUNAR_SUFFIX 2>/dev/null || true
 fi
-command -v nemo >/dev/null && gsettings set org.nemo.preferences show-full-path-titles true 2>/dev/null || true
+if command -v nemo >/dev/null && command -v gsettings >/dev/null; then
+    # Lo que necesitan las marcas: el titulo con la ruta completa (lo lee el
+    # demonio de marcas) e iconos "standard" en la vista de lista (con iconos
+    # mas chicos Nemo no dibuja los emblemas).
+    gsettings set org.nemo.preferences show-full-path-titles true
+    gsettings set org.nemo.list-view default-zoom-level standard
+    # Para no bajar archivos de la nube solo por mirar una carpeta:
+    gsettings set org.nemo.preferences show-directory-item-counts never
+    gsettings set org.nemo.preferences show-image-thumbnails never
+fi
 nohup /usr/local/bin/onedrive-marcas-vivas >/dev/null 2>&1 &
 
 echo
