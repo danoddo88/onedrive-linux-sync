@@ -89,6 +89,12 @@ Logs live in `~/.config/onedrive-sync/`.
 - `onedrive-local.timer`: reconciliation interval (default 1 min).
 - `onedrive.service`: rclone mount flags (`--vfs-cache-max-size`, `--dir-cache-time`, …).
 
+## Safety rules
+
+- **Newest wins, always.** Reconciliation uses `--conflict-resolve newer`; the resync when pinning uses `--resync-mode newer` (rclone's default would let the *local* copy win, which can silently overwrite edits made elsewhere between the download and the resync). The fast queue uploads with `--update`, so it never replaces a cloud file that is newer than the local one.
+- Pinning never deletes anything in the cloud. The one-way "keep uploaded" mode moves replaced or deleted cloud files to `_reemplazados-<host>/` instead of deleting them.
+- OneDrive keeps per-file version history; if something ever goes wrong, that is where to look.
+
 ## What it is not
 
 - **Not instant from the cloud side.** A change made on another device reaches a pinned folder on the next reconciliation (≤ 1 min). Linux → cloud is seconds.

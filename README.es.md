@@ -87,6 +87,12 @@ Los registros están en `~/.config/onedrive-sync/`.
 - `onedrive-local.timer`: cada cuánto se revisa (1 min por defecto).
 - `onedrive.service`: opciones del montaje de rclone (`--vfs-cache-max-size`, `--dir-cache-time`, …).
 
+## Reglas de seguridad
+
+- **Siempre gana el más nuevo.** La revisión usa `--conflict-resolve newer`; la resincronización al fijar usa `--resync-mode newer` (por defecto rclone haría ganar a la copia *local*, que puede pisar en silencio cambios hechos en otro lado entre la descarga y la resincronización). La cola rápida sube con `--update`, así que nunca reemplaza un archivo de la nube más nuevo que el local.
+- Fijar una carpeta nunca borra nada en la nube. El modo «mantener subida» de un solo sentido mueve lo reemplazado o borrado a `_reemplazados-<máquina>/` en vez de borrarlo.
+- OneDrive guarda historial de versiones por archivo; si algo sale mal, ahí está la vuelta atrás.
+
 ## Lo que no es
 
 - **No es instantáneo desde la nube.** Un cambio hecho en otro dispositivo llega a la carpeta fijada en la próxima revisión (≤ 1 min). Linux → nube es cuestión de segundos.

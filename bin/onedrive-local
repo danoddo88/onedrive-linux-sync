@@ -124,7 +124,11 @@ except Exception: print(\"muy grande para medirla rápido (más de 45 s)\")" 2>/
     anotar "COPIA INICIAL TERMINADA $RUTA (codigo $?); armando la sincronizacion"
     # Paso 2: bisync una vez, para que quede en los dos sentidos. Ya esta todo
     # bajado, asi que solo compara.
-    sincronizar "$DESTINO" "$RUTA" "--resync"; OKF=$?
+    # --resync-mode newer: en una resincronizacion rclone hace ganar a la copia
+    # LOCAL por defecto. Si otro dispositivo cambio un archivo entre la descarga
+    # y este paso, la copia vieja de aca pisaria la nueva. Con "newer" gana el
+    # mas reciente.
+    sincronizar "$DESTINO" "$RUTA" "--resync --resync-mode newer"; OKF=$?
     exec 9>&-
     grep -vxF "$RUTA" "$CONF/en-curso.conf" > "$CONF/en-curso.tmp" 2>/dev/null || true
     mv "$CONF/en-curso.tmp" "$CONF/en-curso.conf"

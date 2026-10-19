@@ -8,7 +8,11 @@ REL="$1"
 A="$LOCAL/$REL"
 [ -f "$A" ] || exit 0
 I=$(date +%s%3N)
-if rclone copyto "$A" "onedrive:$REL" --no-traverse --log-level ERROR 2>>"$REGISTRO"; then
+# --update: si la nube tiene una version MAS NUEVA, no se sube (se saltea).
+# Sin esto, un archivo recien bajado por la revision se volvia a subir y, si
+# otro dispositivo lo habia cambiado en el medio, lo pisaba con la version
+# vieja. Un cambio hecho aca siempre es mas nuevo que la nube, asi que sube.
+if rclone copyto "$A" "onedrive:$REL" --no-traverse --update --log-level ERROR 2>>"$REGISTRO"; then
     echo "$(date "+%F %T")  SUBIDO en $(( $(date +%s%3N) - I )) ms: $REL" >> "$REGISTRO"
     # tilde verde: ya esta en esta PC y ya esta en la nube
     gio set -t stringv "$A" metadata::emblems emblem-default 2>/dev/null
