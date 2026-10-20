@@ -1,0 +1,6 @@
+[Unit]
+Description=OneDrive: chequeo de salud (avisa en pantalla si algo dejo de funcionar)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/onedrive-salud

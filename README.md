@@ -24,6 +24,7 @@ Three separate processes, so none of them blocks the others:
 |---|---|---|
 | `rclone mount` (`onedrive.service`) | Shows the cloud in `~/OneDrive`. Files are fetched when opened and cached on disk. | always |
 | **Fast queue** (`onedrive-cola.service`) | Watches pinned folders with inotify. Every saved file becomes a "slip" in a spool; a dispatcher uploads them 4 at a time with `rclone copyto`. Failed uploads are retried every 15 s, so working offline is fine. | always |
+| **Health check** (`onedrive-salud.timer`) | Every 10 min checks the services, the mount, the Microsoft session, the hourly reconciliation, the change feed, the upload queue and free disk space. If anything stopped working it shows a persistent desktop notification (once per hour while it lasts, and once when it recovers) and logs it to `historial-salud.log`. Run `onedrive-salud` by hand for a status line. | every 10 min |
 | **Change feed** (`onedrive-delta.service`) | Asks Microsoft every 30 s "what changed since my last read?" (the Graph *delta* API, the same thing the official clients use: one request, only the changes, no listing). Changes inside pinned folders are applied file by file: download, rename/move without re-downloading, or delete. Newest wins; it never overwrites a file that is newer on this PC. | always |
 | **Reconciliation** (`onedrive-local.timer`) | `rclone bisync` on each pinned folder, as a safety net: resolves anything the feed missed, recovers on its own after an aborted run. | every hour |
 

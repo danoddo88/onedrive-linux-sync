@@ -1,0 +1,9 @@
+[Unit]
+Description=Chequear la salud de OneDrive cada 10 minutos
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,122 @@
+#!/bin/bash
+# =============================================================================
+#  onedrive-salud: chequeo de salud de la sincronizacion. Lo corre
+#  onedrive-salud.timer cada 10 minutos.
+#
+#  Si algo dejo de funcionar, lanza un aviso en pantalla (persistente, hay que
+#  cerrarlo) y lo anota en ~/.config/onedrive-sync/historial-salud.log. Cada
+#  problema se avisa una vez por hora mientras dure, y una vez mas cuando se
+#  arregla. Ejecutado a mano muestra el estado en la terminal.
+#
+#  Que mira:
+#    1. servicios: montaje (onedrive), lector delta, cola rapida, timer horario
+#    2. el montaje ~/OneDrive responde
+#    3. la sesion con Microsoft sigue valida (rclone about)
+#    4. la revision horaria no viene fallando ni esta vencida
+#    5. el lector delta avanza (su punto de lectura se renueva)
+#    6. la cola no tiene subidas trabadas
+#    7. el disco tiene lugar
+# =============================================================================
+set -u
+CONF="$HOME/.config/onedrive-sync"
+REG="$CONF/historial-salud.log"
+ESTADO="$CONF/salud-estado"          # un archivo por problema activo (con la hora del ultimo aviso)
+RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+BANDERA="$RT/onedrive-revision-en-curso"
+ENTRADA="$RT/onedrive-cola/entrada"
+mkdir -p "$ESTADO"
+export DISPLAY="${DISPLAY:-:0}"
+PROBLEMAS=()
+
+problema() { PROBLEMAS+=("${1//\//_}|$2"); }   # clave|texto (sin barras: es nombre de archivo)
+
+# 1. servicios
+for u in onedrive.service onedrive-delta.service onedrive-cola.service; do
+    systemctl --user is-active --quiet "$u" || problema "serv-$u" "El servicio $u esta caido."
+done
+systemctl --user is-active --quiet onedrive-local.timer || problema "timer" "La revision horaria (onedrive-local.timer) esta apagada."
+
+# 2. montaje
+if ! timeout 20 ls "$HOME/OneDrive" >/dev/null 2>&1; then
+    problema "montaje" "~/OneDrive no responde (montaje rclone caido o colgado)."
+fi
+
+# 3. sesion con Microsoft (token). Solo si hay red.
+if timeout 10 ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; then
+    SAL=$(timeout 40 rclone about onedrive: 2>&1)
+    if [ $? -ne 0 ]; then
+        case "$SAL" in
+            *invalid_grant*|*AADSTS*|*unauthenticated*|*"token expired"*|*"couldn't fetch token"*)
+                problema "sesion" "La sesion con Microsoft vencio o fue revocada. Hay que volver a entrar: rclone config reconnect onedrive:" ;;
+            *) problema "api" "Microsoft no responde a rclone: ${SAL:0:120}" ;;
+        esac
+    fi
+else
+    echo "sin internet: no reviso la sesion"
+fi
+
+# 4. revision horaria: ultimo resultado por carpeta y antiguedad
+if [ -s "$CONF/fijadas.conf" ] && [ -f "$CONF/historial-local.log" ]; then
+    ULT_OK=$(grep -n "Bisync successful" "$CONF/historial-local.log" | tail -1 | cut -d: -f1)
+    while IFS= read -r R; do
+        [ -n "$R" ] || continue
+        # fallo mas reciente que el ultimo exito de cualquier revision
+        ULT_MAL=$(grep -nF -e "FALLO en $R" -e "NO SE PUDO RECUPERAR $R" "$CONF/historial-local.log" | tail -1 | cut -d: -f1)
+        [ -n "$ULT_MAL" ] && [ "$ULT_MAL" -gt "${ULT_OK:-0}" ] && \
+            problema "revision-$R" "La revision de «$R» fallo (ver historial-local.log)."
+    done < "$CONF/fijadas.conf"
+    # ninguna revision exitosa en 3 h, sin una descarga inicial en curso
+    ULT=$(grep -n "Bisync successful" "$CONF/historial-local.log" | tail -1 | cut -d: -f1)
+    if [ -n "$ULT" ] && [ ! -s "$CONF/en-curso.conf" ]; then
+        F=$(sed -n "${ULT}p" "$CONF/historial-local.log" | grep -oE "^[0-9/]+ [0-9:]+")
+        T=$(date -d "${F//\//-}" +%s 2>/dev/null || echo 0)
+        [ $(( $(date +%s) - T )) -gt 10800 ] && problema "revision-vieja" "Hace mas de 3 horas que ninguna revision horaria termina bien."
+    fi
+fi
+
+# 5. lector delta: su punto de lectura se guarda en cada pasada (cada 30 s)
+if [ -f "$CONF/delta.json" ] && [ ! -e "$BANDERA" ]; then
+    G=$(python3 -c "import json;print(json.load(open('$CONF/delta.json')).get('guardado',''))" 2>/dev/null)
+    T=$(date -d "$G" +%s 2>/dev/null || echo 0)
+    [ $(( $(date +%s) - T )) -gt 900 ] && problema "delta-parado" "El lector de cambios no avanza desde $G."
+fi
+if [ -f "$CONF/historial-delta.log" ]; then
+    N=$(grep -c "error al leer cambios" <(tail -40 "$CONF/historial-delta.log"))
+    [ "$N" -ge 5 ] && problema "delta-errores" "El lector de cambios acumula $N errores seguidos (ver historial-delta.log)."
+fi
+
+# 6. cola: fichas de mas de 30 min sin subir
+if [ -d "$ENTRADA" ]; then
+    V=$(find "$ENTRADA" -type f -mmin +30 2>/dev/null | wc -l)
+    [ "$V" -gt 0 ] && problema "cola-trabada" "La cola rapida tiene $V archivos esperando subir desde hace mas de 30 min."
+fi
+
+# 7. disco
+LIBRE=$(df -BG --output=avail "$HOME" | tail -1 | tr -d " G")
+[ "${LIBRE:-99}" -lt 5 ] && problema "disco" "Quedan ${LIBRE} GB libres en el disco."
+
+# ---- avisar -----------------------------------------------------------------
+AHORA=$(date +%s)
+ACTIVOS=()
+for p in "${PROBLEMAS[@]}"; do
+    K="${p%%|*}"; TXT="${p#*|}"; ACTIVOS+=("$K")
+    ULT=$(cat "$ESTADO/$K" 2>/dev/null || echo 0)
+    if [ $(( AHORA - ULT )) -ge 3600 ]; then
+        echo "$AHORA" > "$ESTADO/$K"
+        echo "$(date '+%F %T')  PROBLEMA: $TXT" >> "$REG"
+        notify-send -u critical -i dialog-error "OneDrive: algo dejo de funcionar" "$TXT" 2>/dev/null
+    fi
+    echo "PROBLEMA: $TXT"
+done
+# lo que se arreglo
+for f in "$ESTADO"/*; do
+    [ -e "$f" ] || continue
+    K=$(basename "$f")
+    printf "%s\n" "${ACTIVOS[@]}" | grep -qx "$K" && continue
+    rm -f "$f"
+    echo "$(date '+%F %T')  RESUELTO: $K" >> "$REG"
+    notify-send -u normal -i emblem-default "OneDrive" "Se arreglo: $K" 2>/dev/null
+done
+[ ${#PROBLEMAS[@]} -eq 0 ] && echo "OneDrive: todo en orden ($(date '+%H:%M'))"
+
+exit 0
