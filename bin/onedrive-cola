@@ -23,18 +23,19 @@ RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; : "${RT:?}"
 ENTRADA="$RT/onedrive-cola/entrada"
 PROCESO="$RT/onedrive-cola/proceso"
 BANDERA="$RT/onedrive-revision-en-curso"
+IGNORAR="$RT/onedrive-cola/ignorar"   # avisos de onedrive-delta: "esto lo baje yo"
 LOTE="$RT/onedrive-cola/lote.txt"
 EN_CURSO="$HOME/.config/onedrive-sync/en-curso.conf"
 PARALELO=4
 
-mkdir -p "$LOCAL" "$HOME/.config/onedrive-sync" "$ENTRADA"
+mkdir -p "$IGNORAR" "$LOCAL" "$HOME/.config/onedrive-sync" "$ENTRADA"
 anotar() { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
 anotar "cola iniciada (hasta $PARALELO subidas en paralelo)"
 
 # ---- ANOTADOR -------------------------------------------------------------
 (
   inotifywait -m -r -q -e close_write -e moved_to --format "%w%f" \
-      --exclude '(\.goutputstream|\.swp$|\.tmp$|~$|/\.git/)' "$LOCAL" 2>/dev/null |
+      --exclude '(\.goutputstream|\.swp$|\.tmp$|~$|/\.git/|/\.odtmp-)' "$LOCAL" 2>/dev/null |
   while IFS= read -r A; do
       [ -f "$A" ] || continue
       REL="${A#$LOCAL/}"
@@ -50,6 +51,12 @@ anotar "cola iniciada (hasta $PARALELO subidas en paralelo)"
           [ "$SALTAR" = 1 ] && continue
       fi
       NOMBRE=$(printf "%s" "$REL" | md5sum | cut -d" " -f1)
+      # Lo que acaba de bajar onedrive-delta desde la nube no se sube de
+      # vuelta: deja un aviso con la fecha que le puso al archivo.
+      if [ -f "$IGNORAR/$NOMBRE" ]; then
+          F_AVISO=$(cat "$IGNORAR/$NOMBRE" 2>/dev/null); rm -f "$IGNORAR/$NOMBRE"
+          [ "$(stat -c %Y "$A" 2>/dev/null)" = "$F_AVISO" ] && continue
+      fi
       printf "%s" "$REL" > "$ENTRADA/$NOMBRE" 2>/dev/null
   done
 ) &

@@ -1,0 +1,11 @@
+[Unit]
+Description=OneDrive: lector del registro de cambios (delta) para las carpetas guardadas en esta PC
+After=onedrive.service
+
+[Service]
+ExecStart=/usr/local/bin/onedrive-delta
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

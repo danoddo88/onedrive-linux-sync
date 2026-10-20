@@ -24,7 +24,10 @@ Three separate processes, so none of them blocks the others:
 |---|---|---|
 | `rclone mount` (`onedrive.service`) | Shows the cloud in `~/OneDrive`. Files are fetched when opened and cached on disk. | always |
 | **Fast queue** (`onedrive-cola.service`) | Watches pinned folders with inotify. Every saved file becomes a "slip" in a spool; a dispatcher uploads them 4 at a time with `rclone copyto`. Failed uploads are retried every 15 s, so working offline is fine. | always |
-| **Reconciliation** (`onedrive-local.timer`) | `rclone bisync` on each pinned folder, every minute. Brings down what changed elsewhere, resolves conflicts (newest wins), recovers on its own after an aborted run. | every minute |
+| **Change feed** (`onedrive-delta.service`) | Asks Microsoft every 30 s "what changed since my last read?" (the Graph *delta* API, the same thing the official clients use: one request, only the changes, no listing). Changes inside pinned folders are applied file by file: download, rename/move without re-downloading, or delete. Newest wins; it never overwrites a file that is newer on this PC. | always |
+| **Reconciliation** (`onedrive-local.timer`) | `rclone bisync` on each pinned folder, as a safety net: resolves anything the feed missed, recovers on its own after an aborted run. | every hour |
+
+The change feed reuses rclone's OneDrive session (`~/.config/rclone/rclone.conf`) and asks rclone to refresh it when it expires; it keeps its read position in `~/.config/onedrive-sync/delta.json` and an item-id → path map in `delta-ids.sqlite` (needed because a deletion in the feed carries only the id). Files it downloads are flagged to the fast queue so they are not uploaded straight back.
 
 Pinning a folder (`onedrive-local --fijar`) first runs `rclone sync` cloud → disk, which compares and downloads at the same time (unlike `bisync`, which lists everything before downloading anything), then one `bisync --resync` to set up two-way sync. Downloads run one folder at a time with 16 parallel transfers capped at 12 requests per second: going over Microsoft's per-account quota pauses *every* transfer for minutes, so staying just under it is faster than more threads.
 
@@ -87,6 +90,7 @@ Logs live in `~/.config/onedrive-sync/`.
 
 - `ONEDRIVE_HILOS` (default 16): parallel transfers when pinning a folder.
 - `ONEDRIVE_TPS` (default 12): max requests per second when pinning, to stay under Microsoft's quota.
+- `ONEDRIVE_DELTA_SEG` (default 30): seconds between change-feed polls.
 - `onedrive-local.timer`: reconciliation interval (default 1 min).
 - `onedrive.service`: rclone mount flags (`--vfs-cache-max-size`, `--dir-cache-time`, …).
 
@@ -99,7 +103,7 @@ Logs live in `~/.config/onedrive-sync/`.
 
 ## What it is not
 
-- **Not instant from the cloud side.** A change made on another device reaches a pinned folder on the next reconciliation (≤ 1 min). Linux → cloud is seconds.
+- **Not instant from the cloud side.** A change made on another device reaches a pinned folder in about 1–2 minutes: that device's upload time, plus the 30–90 s Microsoft takes to publish it in the change feed. Measured: edit 154 s end to end (54 s of which was the Mac uploading), rename 63 s, delete ~60 s. Linux → cloud is seconds.
 - **Not a replacement for a real client on huge trees of tiny files.** Every file is a request to Microsoft; `node_modules` with 40 000 files will take a while whatever you do.
 - **Nothing is deleted in the cloud by unpinning.** Unpin keeps both copies. Two-way sync *does* propagate deletions you make yourself, as any sync does.
 

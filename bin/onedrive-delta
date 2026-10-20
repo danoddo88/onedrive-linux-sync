@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+# =============================================================================
+#  LECTOR DEL REGISTRO DE CAMBIOS (delta) DE ONEDRIVE
+#
+#  Hace lo mismo que el cliente oficial de Windows y Mac: cada 30 s le
+#  pregunta a Microsoft "que cambio desde mi ultimo punto de lectura". La
+#  respuesta son solo los cambios (un pedido, unas pocas entradas), no una
+#  lista de toda la cuenta. Si un cambio cae dentro de una carpeta guardada
+#  en esta PC, lo aplica a ese archivo solo:
+#
+#     archivo nuevo o editado en la nube   -> se baja, si es mas nuevo que el local
+#     archivo renombrado o movido          -> se renombra aca, sin bajarlo de nuevo
+#     archivo o carpeta borrado en la nube -> se borra aca (la copia de la nube
+#                                             queda en la papelera de OneDrive)
+#
+#  Regla de siempre: GANA EL MAS NUEVO. Nunca pisa un archivo que esta PC
+#  tenga mas nuevo (ese sube por la cola rapida).
+#
+#  Lo que cambia en esta PC no pasa por aca: lo sube la cola rapida
+#  (onedrive-cola, con inotify). La revision completa (bisync) queda como
+#  red de seguridad cada tanto, ya no cada minuto.
+#
+#  Usa la sesion que ya tiene rclone (~/.config/rclone/rclone.conf) y le
+#  pide a rclone que la renueve cuando vence.
+#
+#  Estado:  ~/.config/onedrive-sync/delta.json        punto de lectura
+#           ~/.config/onedrive-sync/delta-ids.sqlite  id de cada archivo -> ruta
+#  Registro ~/.config/onedrive-sync/historial-delta.log
+# =============================================================================
+import configparser, json, os, re, shutil, sqlite3, subprocess, sys, threading, time
+import urllib.error, urllib.parse, urllib.request
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+CONF = f"{HOME}/.config/onedrive-sync"
+FIJADAS = f"{CONF}/fijadas.conf"
+LOCAL = f"{HOME}/.onedrive-local"
+NUBE = f"{HOME}/OneDrive"
+ESTADO = f"{CONF}/delta.json"
+DB = f"{CONF}/delta-ids.sqlite"
+REGISTRO = f"{CONF}/historial-delta.log"
+RCLONE_CONF = f"{HOME}/.config/rclone/rclone.conf"
+RT = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+BANDERA = f"{RT}/onedrive-revision-en-curso"
+IGNORAR = f"{RT}/onedrive-cola/ignorar"     # avisos a la cola: "esto lo baje yo, no lo subas"
+INTERVALO = int(os.environ.get("ONEDRIVE_DELTA_SEG", "30"))
+GRAPH = "https://graph.microsoft.com/v1.0"
+TEMP = ".odtmp-"
+
+os.makedirs(CONF, exist_ok=True)
+os.makedirs(IGNORAR, exist_ok=True)
+
+
+def anotar(msg):
+    linea = f"{time.strftime('%F %T')}  {msg}"
+    with open(REGISTRO, "a") as f:
+        f.write(linea + "\n")
+    print(linea, flush=True)
+
+
+# ---- sesion (token) --------------------------------------------------------
+def leer_sesion():
+    c = configparser.ConfigParser()
+    c.read(RCLONE_CONF)
+    s = c["onedrive"]
+    t = json.loads(s["token"])
+    exp = re.sub(r"(\.\d{6})\d+", r"\1", t.get("expiry", "2000-01-01T00:00:00Z")).replace("Z", "+00:00")
+    try:
+        vence = datetime.fromisoformat(exp).timestamp()
+    except ValueError:
+        vence = 0
+    return t["access_token"], vence, s["drive_id"]
+
+
+def renovar_sesion():
+    # rclone renueva el token si vencio y lo guarda en su configuracion.
+    subprocess.run(["rclone", "about", "onedrive:", "--json"], capture_output=True, timeout=90)
+
+
+class Sesion:
+    def __init__(self):
+        self.token, self.vence, self.drive = leer_sesion()
+
+    def vigente(self):
+        if time.time() >= self.vence - 20:
+            renovar_sesion()
+            self.token, self.vence, self.drive = leer_sesion()
+        return self.token
+
+
+SES = Sesion()
+
+
+# ---- pedidos a Microsoft ---------------------------------------------------
+class SinRedirigir(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+ABRIR_SIN_REDIRIGIR = urllib.request.build_opener(SinRedirigir)
+
+
+def pedir(url, reintentos=3):
+    """GET con la sesion. Devuelve (json, None) o (None, error)."""
+    for i in range(reintentos):
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {SES.vigente()}"})
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return json.load(r), None
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                renovar_sesion()
+                SES.token, SES.vence, SES.drive = leer_sesion()
+                continue
+            if e.code in (429, 503, 504):
+                espera = int(e.headers.get("Retry-After", "30") or 30)
+                anotar(f"Microsoft pide esperar {espera} s (HTTP {e.code})")
+                time.sleep(min(espera, 300))
+                continue
+            return None, e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            time.sleep(10 * (i + 1))
+            ultimo = e
+    return None, ultimo if "ultimo" in dir() else RuntimeError("sin respuesta")
+
+
+def url_descarga(item_id):
+    """La direccion temporal de descarga del archivo (sin pasar la sesion al CDN)."""
+    req = urllib.request.Request(f"{GRAPH}/drives/{SES.drive}/items/{item_id}/content",
+                                 headers={"Authorization": f"Bearer {SES.vigente()}"})
+    try:
+        ABRIR_SIN_REDIRIGIR.open(req, timeout=90)
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308):
+            return e.headers.get("Location")
+        raise
+    return None
+
+
+# ---- carpetas guardadas en esta PC -----------------------------------------
+def fijadas():
+    try:
+        with open(FIJADAS) as f:
+            return [l.strip().strip("/") for l in f if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def carpeta_fijada_de(ruta):
+    """La carpeta fijada que contiene a ruta, o None."""
+    for r in fijadas():
+        if ruta == r or ruta.startswith(r + "/"):
+            return r
+    return None
+
+
+# ---- id -> ruta ------------------------------------------------------------
+db = sqlite3.connect(DB, check_same_thread=False)
+db.execute("CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, ruta TEXT NOT NULL)")
+db.execute("CREATE INDEX IF NOT EXISTS ix_ruta ON items(ruta)")
+db_lock = threading.Lock()
+
+
+def recordar(item_id, ruta):
+    with db_lock:
+        db.execute("INSERT OR REPLACE INTO items VALUES (?,?)", (item_id, ruta))
+        db.commit()
+
+
+def olvidar(item_id, ruta=None, es_carpeta=False):
+    with db_lock:
+        db.execute("DELETE FROM items WHERE id=?", (item_id,))
+        if es_carpeta and ruta:
+            db.execute("DELETE FROM items WHERE ruta LIKE ?", (ruta.replace("%", "\\%").replace("_", "\\_") + "/%",))
+        db.commit()
+
+
+def ruta_recordada(item_id):
+    with db_lock:
+        r = db.execute("SELECT ruta FROM items WHERE id=?", (item_id,)).fetchone()
+    return r[0] if r else None
+
+
+def aprender_carpeta(r):
+    """Lista una carpeta fijada una vez (con rclone) para conocer el id de lo
+    que ya existia antes de arrancar. Sin esto, un borrado o renombre de un
+    archivo viejo no se podria ubicar (la respuesta delta de un borrado no
+    trae la ruta, solo el id)."""
+    try:
+        p = subprocess.run(["rclone", "lsjson", "-R", f"onedrive:{r}"], capture_output=True, text=True, timeout=3600)
+        if p.returncode != 0:
+            anotar(f"no pude aprender {r}: {p.stderr.strip()[:120]}")
+            return
+        n = 0
+        with db_lock:
+            for it in json.loads(p.stdout):
+                db.execute("INSERT OR REPLACE INTO items VALUES (?,?)", (it["ID"], f"{r}/{it['Path']}"))
+                n += 1
+            db.execute("INSERT OR REPLACE INTO items VALUES (?,?)", (id_de_ruta(r) or f"raiz:{r}", r))
+            db.commit()
+        anotar(f"aprendida {r}: {n} entradas")
+    except Exception as e:
+        anotar(f"no pude aprender {r}: {e}")
+
+
+def id_de_ruta(r):
+    j, e = pedir(f"{GRAPH}/drives/{SES.drive}/root:/{urllib.parse.quote(r)}")
+    return j.get("id") if j else None
+
+
+APRENDIDAS = set()
+
+
+def aprender_lo_nuevo():
+    for r in fijadas():
+        if r not in APRENDIDAS:
+            APRENDIDAS.add(r)
+            threading.Thread(target=aprender_carpeta, args=(r,), daemon=True).start()
+
+
+# ---- aplicar un cambio -----------------------------------------------------
+def ruta_de(item):
+    p = item.get("parentReference", {}).get("path")
+    if p is None:
+        return None
+    base = urllib.parse.unquote(p.split("root:", 1)[1]).strip("/")
+    return (base + "/" if base else "") + item["name"]
+
+
+def fecha(item):
+    s = (item.get("fileSystemInfo") or {}).get("lastModifiedDateTime") or item.get("lastModifiedDateTime")
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s).replace("Z", "+00:00")
+    return datetime.fromisoformat(s).timestamp()
+
+
+def avisar_cola(ruta, mtime):
+    import hashlib
+    nombre = hashlib.md5(ruta.encode()).hexdigest()
+    with open(f"{IGNORAR}/{nombre}", "w") as f:
+        f.write(str(int(mtime)))
+
+
+def marcar(ruta):
+    for base in (LOCAL, NUBE):
+        subprocess.run(["gio", "set", "-t", "stringv", f"{base}/{ruta}", "metadata::emblems", "emblem-default"],
+                       capture_output=True)
+
+
+def bajar(item, ruta):
+    destino = f"{LOCAL}/{ruta}"
+    mt = fecha(item)
+    tam = item.get("size", -1)
+    if os.path.isfile(destino):
+        st = os.stat(destino)
+        if st.st_size == tam and abs(st.st_mtime - mt) < 2:
+            return "igual"
+        if st.st_mtime > mt + 2:
+            anotar(f"LOCAL MAS NUEVO, no bajo: {ruta}")
+            return "local-mas-nuevo"
+    url = url_descarga(item["id"])
+    if not url:
+        raise RuntimeError("sin direccion de descarga")
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    tmp = f"{os.path.dirname(destino)}/{TEMP}{os.path.basename(destino)}"
+    with urllib.request.urlopen(url, timeout=600) as r, open(tmp, "wb") as f:
+        shutil.copyfileobj(r, f, 1 << 20)
+    os.utime(tmp, (mt, mt))
+    avisar_cola(ruta, mt)
+    os.replace(tmp, destino)
+    marcar(ruta)
+    return "bajado"
+
+
+def aplicar(item):
+    item_id = item["id"]
+    if item.get("name") == "root" and "parentReference" not in item:
+        return
+    ruta = ruta_de(item)
+    antes = ruta_recordada(item_id)
+    borrado = "deleted" in item
+    es_carpeta = "folder" in item
+
+    if borrado:
+        ruta = antes or ruta
+        if not ruta:
+            return                      # nunca lo vimos: lo resolvera la revision
+        fij = carpeta_fijada_de(ruta)
+        if not fij:
+            olvidar(item_id)
+            return
+        if ruta == fij:
+            anotar(f"ATENCION: la carpeta guardada «{ruta}» fue borrada en la nube. No toco la copia local.")
+            return
+        destino = f"{LOCAL}/{ruta}"
+        if os.path.isdir(destino) and not os.path.islink(destino):
+            shutil.rmtree(destino, ignore_errors=True)
+            anotar(f"BORRADA carpeta: {ruta}")
+        elif os.path.lexists(destino):
+            os.remove(destino)
+            anotar(f"BORRADO: {ruta}")
+        olvidar(item_id, ruta, es_carpeta=True)
+        return
+
+    if ruta is None:
+        return
+    fij = carpeta_fijada_de(ruta)
+    if not fij:
+        if antes and carpeta_fijada_de(antes):
+            # Se fue de una carpeta guardada hacia afuera: aca ya no va.
+            d = f"{LOCAL}/{antes}"
+            if os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+            elif os.path.lexists(d):
+                os.remove(d)
+            anotar(f"MOVIDO FUERA de la carpeta guardada: {antes} -> {ruta}")
+        olvidar(item_id)
+        return
+
+    # Renombre o movida dentro de lo guardado: mover aca, sin volver a bajar.
+    if antes and antes != ruta and carpeta_fijada_de(antes):
+        de, a = f"{LOCAL}/{antes}", f"{LOCAL}/{ruta}"
+        if os.path.lexists(de) and not os.path.lexists(a):
+            os.makedirs(os.path.dirname(a), exist_ok=True)
+            os.replace(de, a)
+            anotar(f"RENOMBRADO: {antes} -> {ruta}")
+            if es_carpeta:
+                with db_lock:
+                    db.execute("UPDATE items SET ruta = ? || substr(ruta, ?) WHERE ruta LIKE ?",
+                               (ruta, len(antes) + 1, antes.replace("%", "\\%").replace("_", "\\_") + "/%"))
+                    db.commit()
+    recordar(item_id, ruta)
+
+    if es_carpeta:
+        os.makedirs(f"{LOCAL}/{ruta}", exist_ok=True)
+        return
+    if "file" in item:
+        r = bajar(item, ruta)
+        if r == "bajado":
+            anotar(f"BAJADO: {ruta} ({item.get('size', 0)} bytes)")
+
+
+# ---- bucle principal -------------------------------------------------------
+def leer_estado():
+    try:
+        with open(ESTADO) as f:
+            return json.load(f).get("deltaLink")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def guardar_estado(link):
+    tmp = ESTADO + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"deltaLink": link, "guardado": time.strftime("%F %T")}, f)
+    os.replace(tmp, ESTADO)
+
+
+def una_vuelta():
+    link = leer_estado()
+    if not link:
+        link = f"{GRAPH}/drives/{SES.drive}/root/delta?token=latest"
+        anotar("sin punto de lectura: arranco desde ahora")
+    cambios = 0
+    while True:
+        j, e = pedir(link)
+        if e is not None:
+            if getattr(e, "code", None) == 410:
+                anotar("Microsoft descarto mi punto de lectura (410): arranco desde ahora y pido una revision completa")
+                guardar_estado(None)
+                subprocess.Popen(["/usr/local/bin/onedrive-local", "--ahora"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, env={**os.environ, "DISPLAY": ""})
+                return 0
+            anotar(f"error al leer cambios: {e}")
+            return 0
+        for item in j.get("value", []):
+            if os.environ.get("ONEDRIVE_DELTA_DEBUG"):
+                anotar(f"visto: {item.get('name')} | ruta={ruta_de(item)} | antes={ruta_recordada(item['id'])} | "
+                       f"{'carpeta' if 'folder' in item else 'archivo' if 'file' in item else '?'}{' BORRADO' if 'deleted' in item else ''}")
+            try:
+                if carpeta_fijada_de(ruta_de(item) or "") or carpeta_fijada_de(ruta_recordada(item["id"]) or ""):
+                    cambios += 1
+                aplicar(item)
+            except Exception as ex:
+                anotar(f"no pude aplicar {item.get('name')}: {ex}")
+        if "@odata.nextLink" in j:
+            link = j["@odata.nextLink"]
+            continue
+        guardar_estado(j.get("@odata.deltaLink", link))
+        return cambios
+
+
+def main():
+    if "--una-vez" in sys.argv:
+        n = una_vuelta()
+        print(f"cambios aplicados en carpetas guardadas: {n}")
+        return
+    anotar(f"lector delta iniciado (cada {INTERVALO} s)")
+    aprender_lo_nuevo()
+    while True:
+        try:
+            if os.path.exists(BANDERA):
+                if os.environ.get("ONEDRIVE_DELTA_DEBUG"):
+                    anotar("bandera puesta: espero")
+                time.sleep(5)          # hay una revision completa en curso: no me cruzo
+                continue
+            aprender_lo_nuevo()
+            una_vuelta()
+        except Exception as ex:
+            anotar(f"error inesperado: {ex}")
+        time.sleep(INTERVALO)
+
+
+if __name__ == "__main__":
+    main()

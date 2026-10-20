@@ -22,7 +22,10 @@ Tres procesos separados, así ninguno traba a los otros:
 |---|---|---|
 | `rclone mount` (`onedrive.service`) | Muestra la nube en `~/OneDrive`. Los archivos se bajan al abrirlos y quedan en caché en disco. | siempre |
 | **Cola rápida** (`onedrive-cola.service`) | Vigila las carpetas fijadas con inotify. Cada archivo guardado es un «papelito» en una sala de espera; un repartidor los sube de a 4 con `rclone copyto`. Lo que falla se reintenta cada 15 s, así que trabajar sin internet no es problema. | siempre |
-| **Revisión** (`onedrive-local.timer`) | `rclone bisync` sobre cada carpeta fijada, cada minuto. Baja lo que cambió en otro lado, resuelve conflictos (gana el más nuevo) y se recupera solo si una corrida abortó. | cada minuto |
+| **Registro de cambios** (`onedrive-delta.service`) | Cada 30 s le pregunta a Microsoft «¿qué cambió desde mi última lectura?» (la API *delta* de Graph, lo mismo que usan los clientes oficiales: un pedido, solo los cambios, sin listar nada). Lo que cae en una carpeta fijada se aplica archivo por archivo: baja, renombra o mueve sin volver a bajar, o borra. Gana el más nuevo; nunca pisa un archivo más nuevo en esta PC. | siempre |
+| **Revisión** (`onedrive-local.timer`) | `rclone bisync` sobre cada carpeta fijada, como red de seguridad: resuelve lo que el registro no haya visto y se recupera solo si una corrida abortó. | cada hora |
+
+El registro de cambios reutiliza la sesión de OneDrive de rclone (`~/.config/rclone/rclone.conf`) y le pide a rclone que la renueve cuando vence; guarda su punto de lectura en `~/.config/onedrive-sync/delta.json` y un mapa id → ruta en `delta-ids.sqlite` (hace falta porque un borrado en el registro trae solo el id). Lo que baja se lo avisa a la cola rápida, para que no lo suba de vuelta.
 
 Fijar una carpeta (`onedrive-local --fijar`) hace primero un `rclone sync` nube → disco, que compara y descarga a la vez (`bisync`, en cambio, lista todo antes de bajar nada), y después un `bisync --resync` para dejar armada la sincronización en los dos sentidos. Las descargas van de a una carpeta con 16 transferencias en paralelo y un tope de 12 pedidos por segundo: pasarse del cupo de Microsoft frena *todas* las descargas por minutos, así que quedarse justo debajo es más rápido que poner más hilos.
 
@@ -85,6 +88,7 @@ Los registros están en `~/.config/onedrive-sync/`.
 
 - `ONEDRIVE_HILOS` (16 por defecto): transferencias en paralelo al fijar una carpeta.
 - `ONEDRIVE_TPS` (12 por defecto): tope de pedidos por segundo al fijar, para quedar debajo del cupo de Microsoft.
+- `ONEDRIVE_DELTA_SEG` (30 por defecto): segundos entre consultas al registro de cambios.
 - `onedrive-local.timer`: cada cuánto se revisa (1 min por defecto).
 - `onedrive.service`: opciones del montaje de rclone (`--vfs-cache-max-size`, `--dir-cache-time`, …).
 
@@ -97,7 +101,7 @@ Los registros están en `~/.config/onedrive-sync/`.
 
 ## Lo que no es
 
-- **No es instantáneo desde la nube.** Un cambio hecho en otro dispositivo llega a la carpeta fijada en la próxima revisión (≤ 1 min). Linux → nube es cuestión de segundos.
+- **No es instantáneo desde la nube.** Un cambio hecho en otro dispositivo llega a la carpeta fijada en 1 o 2 minutos: lo que tarda ese dispositivo en subirlo, más los 30–90 s que Microsoft tarda en publicarlo en el registro de cambios. Medido: edición 154 s punta a punta (54 s de ellos la Mac subiendo), renombre 63 s, borrado ~60 s. Linux → nube es cuestión de segundos.
 - **No reemplaza a un cliente real en árboles enormes de archivos chicos.** Cada archivo es un pedido a Microsoft; un `node_modules` de 40 000 archivos tarda, se haga lo que se haga.
 - **Soltar una carpeta no borra nada en la nube.** La sincronización en dos sentidos *sí* propaga los borrados que hagas vos, como cualquier sincronización.
 

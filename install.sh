@@ -25,7 +25,7 @@ mkdir -p ~/.config/systemd/user ~/.config/autostart ~/.config/onedrive-sync ~/On
 install -m 644 systemd/* ~/.config/systemd/user/
 install -m 644 autostart/onedrive-marcas-vivas.desktop ~/.config/autostart/
 systemctl --user daemon-reload
-systemctl --user enable --now onedrive.service onedrive-cola.service onedrive-local.timer onedrive-sync.timer
+systemctl --user enable --now onedrive.service onedrive-cola.service onedrive-delta.service onedrive-local.timer onedrive-sync.timer
 sudo loginctl enable-linger "$USER"   # para que arranque sin iniciar sesion grafica
 
 echo "== Menu del boton derecho"
