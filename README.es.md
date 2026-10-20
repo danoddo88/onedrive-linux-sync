@@ -24,7 +24,7 @@ Tres procesos separados, así ninguno traba a los otros:
 | **Cola rápida** (`onedrive-cola.service`) | Vigila las carpetas fijadas con inotify. Cada archivo guardado es un «papelito» en una sala de espera; un repartidor los sube de a 4 con `rclone copyto`. Lo que falla se reintenta cada 15 s, así que trabajar sin internet no es problema. | siempre |
 | **Revisión** (`onedrive-local.timer`) | `rclone bisync` sobre cada carpeta fijada, cada minuto. Baja lo que cambió en otro lado, resuelve conflictos (gana el más nuevo) y se recupera solo si una corrida abortó. | cada minuto |
 
-Fijar una carpeta (`onedrive-local --fijar`) hace primero un `rclone copy` nube → disco, que compara y descarga a la vez (`bisync`, en cambio, lista todo antes de bajar nada), y después un `bisync --resync` para dejar armada la sincronización en los dos sentidos. Las descargas van de a una carpeta con 32 transferencias en paralelo; más que eso, Microsoft frena, y rclone espera solo.
+Fijar una carpeta (`onedrive-local --fijar`) hace primero un `rclone sync` nube → disco, que compara y descarga a la vez (`bisync`, en cambio, lista todo antes de bajar nada), y después un `bisync --resync` para dejar armada la sincronización en los dos sentidos. Las descargas van de a una carpeta con 16 transferencias en paralelo y un tope de 12 pedidos por segundo: pasarse del cupo de Microsoft frena *todas* las descargas por minutos, así que quedarse justo debajo es más rápido que poner más hilos.
 
 Las marcas son metadatos GIO (`metadata::emblems`), que Nemo y Thunar dibujan. Un pequeño demonio (`onedrive-marcas-vivas`) marca **solo la carpeta que tenés abierta**, así que recorrer un OneDrive de 100 000 archivos no cuesta nada.
 
@@ -83,13 +83,15 @@ Los registros están en `~/.config/onedrive-sync/`.
 
 ## Ajustes
 
-- `ONEDRIVE_HILOS` (32 por defecto): transferencias en paralelo al fijar una carpeta.
+- `ONEDRIVE_HILOS` (16 por defecto): transferencias en paralelo al fijar una carpeta.
+- `ONEDRIVE_TPS` (12 por defecto): tope de pedidos por segundo al fijar, para quedar debajo del cupo de Microsoft.
 - `onedrive-local.timer`: cada cuánto se revisa (1 min por defecto).
 - `onedrive.service`: opciones del montaje de rclone (`--vfs-cache-max-size`, `--dir-cache-time`, …).
 
 ## Reglas de seguridad
 
 - **Siempre gana el más nuevo.** La revisión usa `--conflict-resolve newer`; la resincronización al fijar usa `--resync-mode newer` (por defecto rclone haría ganar a la copia *local*, que puede pisar en silencio cambios hechos en otro lado entre la descarga y la resincronización). La cola rápida sube con `--update`, así que nunca reemplaza un archivo de la nube más nuevo que el local.
+- **Lo borrado en otro lado mientras se bajaba no resucita.** El primer paso al fijar deja el disco igual a la nube (`rclone sync`, no `copy`): un archivo que se borra desde otro dispositivo a mitad de la descarga no se queda en esta PC para que la resincronización lo vuelva a subir. Tampoco se borra: se aparta a `~/.local/share/onedrive-sync/apartados/<carpeta>/<fecha>`, fuera de OneDrive. Lo que esta PC tiene más nuevo se conserva (`--update`) y sube.
 - Fijar una carpeta nunca borra nada en la nube. El modo «mantener subida» de un solo sentido mueve lo reemplazado o borrado a `_reemplazados-<máquina>/` en vez de borrarlo.
 - OneDrive guarda historial de versiones por archivo; si algo sale mal, ahí está la vuelta atrás.
 

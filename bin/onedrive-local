@@ -109,19 +109,33 @@ except Exception: print(\"muy grande para medirla rápido (más de 45 s)\")" 2>/
     # Muchos hilos: con archivos chicos el limite es la espera de cada pedido,
     # no la linea. Microsoft frena si se abusa; rclone espera y sigue solo.
     # Se ajusta con la variable ONEDRIVE_HILOS (ver README).
-    HILOS="${ONEDRIVE_HILOS:-32}"
+    HILOS="${ONEDRIVE_HILOS:-16}"
     OPC="${OPC/--transfers 8 --checkers 8/--transfers $HILOS --checkers $HILOS}"
     anotar "FIJANDO $RUTA -> $DESTINO ($TAM)"
     aviso "Descargando «$(basename "$C")»... ($TAM)"
-    # Paso 1: copy de la nube a la PC. Compara carpeta por carpeta y baja lo
-    # que falta mientras sigue comparando (bisync, en cambio, lista todo antes
-    # de bajar nada). Es de un solo sentido: nunca sube ni borra en la nube.
+    # Paso 1: dejar la copia de la PC igual a la nube. Compara carpeta por
+    # carpeta y baja lo que falta mientras sigue comparando (bisync, en cambio,
+    # lista todo antes de bajar nada). Nunca sube ni borra en la nube.
     # Si se corta, al retomarlo saltea lo que ya esta y sigue.
+    # SALVAGUARDA: es "sync", no "copy". Lo que esta en la PC y ya no esta en
+    # la nube (por ejemplo, borrado desde otro dispositivo mientras bajaba) NO
+    # se queda: si se quedara, el paso 2 lo volveria a subir y reapareceria.
+    # Tampoco se borra: se aparta a $APARTADOS, fuera de OneDrive.
+    # --update: lo que la PC tiene mas nuevo que la nube no se pisa; sube en
+    # el paso 2, porque es un cambio de verdad.
+    # --tpslimit: tope de pedidos por segundo, para quedar debajo del cupo de
+    # Microsoft. Pasarse frena TODAS las descargas por minutos.
+    TPS="${ONEDRIVE_TPS:-12}"
+    APARTADOS="$HOME/.local/share/onedrive-sync/apartados/$RUTA/$(date +%F_%H%M)"
     touch "$BANDERA"
-    rclone copy "onedrive:$RUTA" "$DESTINO" --transfers "$HILOS" --checkers "$HILOS" \
+    rclone sync "onedrive:$RUTA" "$DESTINO" --update --backup-dir "$APARTADOS" \
+        --transfers "$HILOS" --checkers "$HILOS" --tpslimit "$TPS" --tpslimit-burst "$TPS" \
         --create-empty-src-dirs --exclude ".Trash-*/**" --exclude "*.tmp" \
         --log-file "$REGISTRO" --log-level INFO --stats 1m
-    anotar "COPIA INICIAL TERMINADA $RUTA (codigo $?); armando la sincronizacion"
+    R1=$?
+    N_AP=$(find "$APARTADOS" -type f 2>/dev/null | wc -l)
+    [ "$N_AP" -gt 0 ] && anotar "APARTADOS $N_AP archivos de $RUTA que ya no estan en la nube -> $APARTADOS"
+    anotar "COPIA INICIAL TERMINADA $RUTA (codigo $R1); armando la sincronizacion"
     # Paso 2: bisync una vez, para que quede en los dos sentidos. Ya esta todo
     # bajado, asi que solo compara.
     # --resync-mode newer: en una resincronizacion rclone hace ganar a la copia

@@ -26,7 +26,7 @@ Three separate processes, so none of them blocks the others:
 | **Fast queue** (`onedrive-cola.service`) | Watches pinned folders with inotify. Every saved file becomes a "slip" in a spool; a dispatcher uploads them 4 at a time with `rclone copyto`. Failed uploads are retried every 15 s, so working offline is fine. | always |
 | **Reconciliation** (`onedrive-local.timer`) | `rclone bisync` on each pinned folder, every minute. Brings down what changed elsewhere, resolves conflicts (newest wins), recovers on its own after an aborted run. | every minute |
 
-Pinning a folder (`onedrive-local --fijar`) first runs `rclone copy` cloud → disk, which compares and downloads at the same time (unlike `bisync`, which lists everything before downloading anything), then one `bisync --resync` to set up two-way sync. Downloads run one folder at a time with 32 parallel transfers; Microsoft throttles beyond that and rclone backs off on its own.
+Pinning a folder (`onedrive-local --fijar`) first runs `rclone sync` cloud → disk, which compares and downloads at the same time (unlike `bisync`, which lists everything before downloading anything), then one `bisync --resync` to set up two-way sync. Downloads run one folder at a time with 16 parallel transfers capped at 12 requests per second: going over Microsoft's per-account quota pauses *every* transfer for minutes, so staying just under it is faster than more threads.
 
 Emblems are GIO metadata (`metadata::emblems`), which Nemo and Thunar draw. A small daemon (`onedrive-marcas-vivas`) marks **only the folder you have open**, so a 100 000-file OneDrive costs nothing to browse.
 
@@ -85,13 +85,15 @@ Logs live in `~/.config/onedrive-sync/`.
 
 ## Tuning
 
-- `ONEDRIVE_HILOS` (default 32): parallel transfers when pinning a folder.
+- `ONEDRIVE_HILOS` (default 16): parallel transfers when pinning a folder.
+- `ONEDRIVE_TPS` (default 12): max requests per second when pinning, to stay under Microsoft's quota.
 - `onedrive-local.timer`: reconciliation interval (default 1 min).
 - `onedrive.service`: rclone mount flags (`--vfs-cache-max-size`, `--dir-cache-time`, …).
 
 ## Safety rules
 
 - **Newest wins, always.** Reconciliation uses `--conflict-resolve newer`; the resync when pinning uses `--resync-mode newer` (rclone's default would let the *local* copy win, which can silently overwrite edits made elsewhere between the download and the resync). The fast queue uploads with `--update`, so it never replaces a cloud file that is newer than the local one.
+- **Deleted elsewhere while downloading = not resurrected.** The first pinning step mirrors the cloud onto the disk (`rclone sync`, not `copy`), so a file deleted on another device mid-download does not stay on this PC to be re-uploaded by the resync. It is not deleted either: it is moved to `~/.local/share/onedrive-sync/apartados/<folder>/<date>`, outside OneDrive. Files that are newer on this PC are kept (`--update`) and uploaded.
 - Pinning never deletes anything in the cloud. The one-way "keep uploaded" mode moves replaced or deleted cloud files to `_reemplazados-<host>/` instead of deleting them.
 - OneDrive keeps per-file version history; if something ever goes wrong, that is where to look.
 
