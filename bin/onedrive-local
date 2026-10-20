@@ -36,11 +36,51 @@ OPC="--transfers 8 --checkers 8 --conflict-resolve newer --resilient --recover
 # Bandera que le dice a la cola rapida que se quede quieta mientras
 # comparamos. Sin esto, la cola volveria a subir todo lo que acabamos de bajar.
 BANDERA="${XDG_RUNTIME_DIR:-/tmp}/onedrive-revision-en-curso"
+# Salvaguarda de borrados masivos (la misma que OneDrive de Microsoft): si una
+# pasada va a borrar MAXBORRAR archivos o mas, se frena y se pregunta.
+MAXBORRAR="${ONEDRIVE_MAX_BORRAR:-200}"
+PENDIENTES="$CONF/borrados-pendientes"
+
+# Pregunta "borrar / restaurar / despues" en la pantalla :0 aunque nos hayan
+# lanzado sin DISPLAY (systemd, cron). Devuelve: borrar | restaurar | despues
+preguntar_borrado() {
+    local TXT="$1" R
+    export DISPLAY="${DISPLAY:-:0}"
+    if ! xset q >/dev/null 2>&1 || ! command -v zenity >/dev/null; then echo despues; return; fi
+    R=$(zenity --question --width=520 --title="OneDrive: se borraron muchos archivos" \
+          --text="$TXT" --ok-label="Borrarlos también acá" \
+          --cancel-label="Restaurarlos en la nube" --extra-button="Decidir después" 2>/dev/null)
+    case "$?:$R" in
+        0:*) echo borrar ;;
+        1:"Decidir después") echo despues ;;
+        1:*) echo restaurar ;;
+        *) echo despues ;;
+    esac
+}
+tiene_pendientes() { [ -e "$PENDIENTES/$(printf "%s" "$1" | md5sum | cut -c1-32).json" ]; }
 
 sincronizar() {
     local L="$1" R="$2" EXTRA="${3:-}" RES=0
+    if tiene_pendientes "$R"; then
+        anotar "SALTEADA $R: hay un borrado masivo esperando tu decision"
+        /usr/local/bin/onedrive-borrados --preguntar >/dev/null 2>&1 &
+        return 0
+    fi
     touch "$BANDERA"
     rclone bisync "$L" "onedrive:$R" $OPC $EXTRA || RES=$?
+    # bisync se niega a borrar mas de la mitad de un lado ("Safety abort: too
+    # many deletes"). Es la misma situacion que la pregunta de Microsoft:
+    # borrar tambien del otro lado, o restaurar lo que falta.
+    if [ "$RES" -ne 0 ] && tail -40 "$REGISTRO" 2>/dev/null | grep -q "Safety abort: too many deletes"; then
+        anotar "FRENADA $R: demasiados borrados de un lado; pregunto"
+        case "$(preguntar_borrado "En «$R» desaparecio mas de la mitad de los archivos\nde un lado (esta PC o la nube).\n\n¿Que hago con el otro lado?")" in
+            borrar)    anotar "DECISION borrar en $R"; RES=0
+                       rclone bisync "$L" "onedrive:$R" $OPC $EXTRA --force || RES=$? ;;
+            restaurar) anotar "DECISION restaurar en $R"; RES=0
+                       rclone bisync "$L" "onedrive:$R" $OPC --resync --resync-mode newer || RES=$? ;;
+            *)         anotar "DECISION postergada en $R" ;;
+        esac
+    fi
     # Si una corrida anterior aborto (por ejemplo, sin internet), bisync pierde
     # sus listas y se niega a seguir hasta una resincronizacion. La hacemos
     # solos, con la regla de que gana el archivo mas nuevo de cada lado, asi
@@ -127,11 +167,23 @@ except Exception: print(\"muy grande para medirla rápido (más de 45 s)\")" 2>/
     # Microsoft. Pasarse frena TODAS las descargas por minutos.
     TPS="${ONEDRIVE_TPS:-12}"
     touch "$BANDERA"
-    rclone sync "onedrive:$RUTA" "$DESTINO" --update \
-        --transfers "$HILOS" --checkers "$HILOS" --tpslimit "$TPS" --tpslimit-burst "$TPS" \
-        --create-empty-src-dirs --exclude ".Trash-*/**" --exclude "*.tmp" \
-        --log-file "$REGISTRO" --log-level INFO --stats 1m
+    # --max-delete + --delete-after: primero baja todo; si al final tendria que
+    # borrar MAXBORRAR archivos o mas de esta PC, no borra y pregunta (abajo).
+    OPC1="--update --transfers $HILOS --checkers $HILOS --tpslimit $TPS --tpslimit-burst $TPS
+          --create-empty-src-dirs --log-file $REGISTRO --log-level INFO --stats 1m"
+    EXC=(--exclude ".Trash-*/**" --exclude "*.tmp")
+    rclone sync "onedrive:$RUTA" "$DESTINO" $OPC1 "${EXC[@]}" --delete-after --max-delete "$MAXBORRAR"
     R1=$?
+    if [ "$R1" -ne 0 ] && tail -30 "$REGISTRO" 2>/dev/null | grep -q -- "--max-delete threshold reached"; then
+        anotar "FRENADA $RUTA: la nube tiene $MAXBORRAR archivos menos (o mas) que esta PC; pregunto"
+        case "$(preguntar_borrado "En la nube ya no estan al menos $MAXBORRAR archivos que esta PC\ntiene en «$(basename "$C")» (los borraron desde otro dispositivo).\n\n¿Que hago con la copia de esta PC?")" in
+            borrar)    anotar "DECISION borrar en $RUTA"
+                       rclone sync "onedrive:$RUTA" "$DESTINO" $OPC1 "${EXC[@]}" --delete-after; R1=$? ;;
+            restaurar) anotar "DECISION restaurar en $RUTA (los sube el paso 2)"; R1=0 ;;
+            *)         anotar "DECISION postergada en $RUTA: queda sin terminar; se vuelve a preguntar al retomar"
+                       exec 9>&-; exit 3 ;;
+        esac
+    fi
     anotar "COPIA INICIAL TERMINADA $RUTA (codigo $R1); armando la sincronizacion"
     # Paso 2: bisync una vez, para que quede en los dos sentidos. Ya esta todo
     # bajado, asi que solo compara.

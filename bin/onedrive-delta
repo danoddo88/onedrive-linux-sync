@@ -44,11 +44,17 @@ RT = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 BANDERA = f"{RT}/onedrive-revision-en-curso"
 IGNORAR = f"{RT}/onedrive-cola/ignorar"     # avisos a la cola: "esto lo baje yo, no lo subas"
 INTERVALO = int(os.environ.get("ONEDRIVE_DELTA_SEG", "30"))
+# La misma salvaguarda que OneDrive de Microsoft: si en una pasada la nube
+# borro muchos archivos de una carpeta guardada, no se borran aca sin
+# preguntar (onedrive-borrados pregunta: borrar aca / restaurar en la nube).
+UMBRAL_BORRAR = int(os.environ.get("ONEDRIVE_MAX_BORRAR", "200"))
+PENDIENTES = f"{CONF}/borrados-pendientes"
 GRAPH = "https://graph.microsoft.com/v1.0"
 TEMP = ".odtmp-"
 
 os.makedirs(CONF, exist_ok=True)
 os.makedirs(IGNORAR, exist_ok=True)
+os.makedirs(PENDIENTES, exist_ok=True)
 
 
 def anotar(msg):
@@ -271,6 +277,52 @@ def bajar(item, ruta):
     return "bajado"
 
 
+def archivo_pendiente(carpeta):
+    import hashlib
+    return f"{PENDIENTES}/{hashlib.md5(carpeta.encode()).hexdigest()}.json"
+
+
+def cuantos_borraria(ruta):
+    d = f"{LOCAL}/{ruta}"
+    if os.path.isdir(d) and not os.path.islink(d):
+        return sum(len(fs) for _, _, fs in os.walk(d))
+    return 1 if os.path.lexists(d) else 0
+
+
+def dejar_pendiente(fij, pendientes):
+    """Anota los borrados en el archivo de la carpeta y pide que se pregunte."""
+    archivo = archivo_pendiente(fij)
+    try:
+        with open(archivo) as f:
+            p = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        p = {"carpeta": fij, "creado": time.strftime("%F %T"), "items": []}
+    vistos = {it["id"] for it in p["items"]}
+    p["items"] += [it for it in pendientes if it["id"] not in vistos]
+    tmp = archivo + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(p, f)
+    os.replace(tmp, archivo)
+    subprocess.Popen(["/usr/local/bin/onedrive-borrados", "--preguntar", archivo],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def aplicar_borrados(borrados):
+    """borrados: lista de (item, ruta, fij). Pocos: se borran. Muchos: se pregunta."""
+    por_carpeta = {}
+    for item, ruta, fij in borrados:
+        por_carpeta.setdefault(fij, []).append((item, ruta))
+    for fij, lista in por_carpeta.items():
+        dirs = [r for it, r in lista if "folder" in it]
+        total = sum(cuantos_borraria(r) for _, r in lista if not any(r.startswith(d + "/") for d in dirs))
+        if total >= UMBRAL_BORRAR or os.path.exists(archivo_pendiente(fij)):
+            dejar_pendiente(fij, [{"id": it["id"], "ruta": r, "carpeta": "folder" in it} for it, r in lista])
+            anotar(f"ATENCION: la nube borro {total} archivos de «{fij}». No los toco: pregunto que hacer (onedrive-borrados --lista)")
+            continue
+        for item, ruta in lista:
+            aplicar(item)
+
+
 def aplicar(item):
     item_id = item["id"]
     if item.get("name") == "root" and "parentReference" not in item:
@@ -361,6 +413,7 @@ def una_vuelta():
         link = f"{GRAPH}/drives/{SES.drive}/root/delta?token=latest"
         anotar("sin punto de lectura: arranco desde ahora")
     cambios = 0
+    borrados = []
     while True:
         j, e = pedir(link)
         if e is not None:
@@ -379,12 +432,22 @@ def una_vuelta():
             try:
                 if carpeta_fijada_de(ruta_de(item) or "") or carpeta_fijada_de(ruta_recordada(item["id"]) or ""):
                     cambios += 1
+                if "deleted" in item:
+                    r = ruta_recordada(item["id"]) or ruta_de(item)
+                    fij = carpeta_fijada_de(r or "")
+                    if r and fij and r != fij:
+                        borrados.append((item, r, fij))
+                        continue
                 aplicar(item)
             except Exception as ex:
                 anotar(f"no pude aplicar {item.get('name')}: {ex}")
         if "@odata.nextLink" in j:
             link = j["@odata.nextLink"]
             continue
+        try:
+            aplicar_borrados(borrados)
+        except Exception as ex:
+            anotar(f"no pude aplicar los borrados: {ex}")
         guardar_estado(j.get("@odata.deltaLink", link))
         return cambios
 

@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""
+onedrive-borrados: la misma pregunta que hace OneDrive de Microsoft cuando
+desaparecen muchos archivos de golpe.
+
+Cuando en la nube se borran muchos archivos de una carpeta guardada en esta
+PC (desde otro dispositivo), el lector delta y la revision no los borran aca
+sin preguntar: los anotan como "pendientes" y este programa pregunta:
+
+    Borrarlos tambien aca   |   Restaurarlos en la nube   |   Decidir despues
+
+Mientras no se decida, esa carpeta no se revisa (asi nada se borra ni se
+vuelve a subir por las suyas).
+
+Uso:
+    onedrive-borrados --preguntar [archivo.json]   pregunta por lo pendiente
+    onedrive-borrados --lista                       muestra lo pendiente
+    onedrive-borrados --borrar   archivo.json       sin preguntar
+    onedrive-borrados --restaurar archivo.json      sin preguntar
+"""
+import hashlib, json, os, shutil, sqlite3, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+CONF = f"{HOME}/.config/onedrive-sync"
+LOCAL = f"{HOME}/.onedrive-local"
+PENDIENTES = f"{CONF}/borrados-pendientes"
+DB = f"{CONF}/delta-ids.sqlite"
+REGISTRO = f"{CONF}/historial-delta.log"
+os.makedirs(PENDIENTES, exist_ok=True)
+
+
+def anotar(msg):
+    with open(REGISTRO, "a") as f:
+        f.write(f"{time.strftime('%F %T')}  {msg}\n")
+    print(msg)
+
+
+def archivo_de(carpeta):
+    return f"{PENDIENTES}/{hashlib.md5(carpeta.encode()).hexdigest()}.json"
+
+
+def pendientes():
+    out = []
+    for n in sorted(os.listdir(PENDIENTES)):
+        if n.endswith(".json"):
+            try:
+                with open(f"{PENDIENTES}/{n}") as f:
+                    out.append((f"{PENDIENTES}/{n}", json.load(f)))
+            except (json.JSONDecodeError, OSError):
+                pass
+    return out
+
+
+def sin_hijos(items):
+    """Quita lo que cuelga de una carpeta que tambien esta en la lista."""
+    dirs = [it["ruta"] for it in items if it.get("carpeta")]
+    return [it for it in items if not any(it["ruta"].startswith(d + "/") for d in dirs)]
+
+
+def contar(items):
+    archivos = carpetas = 0
+    for it in sin_hijos(items):
+        p = f"{LOCAL}/{it['ruta']}"
+        if it.get("carpeta"):
+            carpetas += 1
+            for _, _, fs in os.walk(p):
+                archivos += len(fs)
+        elif os.path.lexists(p):
+            archivos += 1
+    return archivos, carpetas
+
+
+def olvidar_ids(items):
+    try:
+        db = sqlite3.connect(DB, timeout=10)
+        for it in items:
+            db.execute("DELETE FROM items WHERE id=?", (it["id"],))
+            if it.get("carpeta"):
+                db.execute("DELETE FROM items WHERE ruta LIKE ?",
+                           (it["ruta"].replace("%", "\\%").replace("_", "\\_") + "/%",))
+        db.commit(); db.close()
+    except sqlite3.Error as e:
+        anotar(f"no pude limpiar la tabla de ids: {e}")
+
+
+def quitar(archivo):
+    try:
+        os.remove(archivo)
+    except FileNotFoundError:
+        pass
+
+
+def borrar(archivo, p):
+    n = 0
+    for it in p["items"]:
+        d = f"{LOCAL}/{it['ruta']}"
+        if not d.startswith(LOCAL + "/") or it["ruta"] == p["carpeta"]:
+            continue                      # nunca la raiz guardada ni nada fuera
+        if os.path.isdir(d) and not os.path.islink(d):
+            shutil.rmtree(d, ignore_errors=True); n += 1
+        elif os.path.lexists(d):
+            os.remove(d); n += 1
+    olvidar_ids(p["items"])
+    quitar(archivo)
+    anotar(f"DECISION borrar: {n} elementos de «{p['carpeta']}» borrados tambien en esta PC")
+
+
+def restaurar(archivo, p):
+    n = 0
+    for it in p["items"]:
+        d = f"{LOCAL}/{it['ruta']}"
+        if not os.path.lexists(d):
+            continue
+        cmd = ["rclone", "copy" if os.path.isdir(d) else "copyto", d, f"onedrive:{it['ruta']}",
+               "--update", "--transfers", "8", "--checkers", "8", "--tpslimit", "12",
+               "--log-file", REGISTRO, "--log-level", "ERROR"]
+        if subprocess.run(cmd).returncode == 0:
+            n += 1
+        else:
+            anotar(f"no pude restaurar {it['ruta']}")
+    olvidar_ids(p["items"])          # los ids viejos ya no existen; los nuevos los aprende el lector
+    quitar(archivo)
+    anotar(f"DECISION restaurar: {n} elementos de «{p['carpeta']}» vueltos a subir a la nube")
+
+
+def preguntar(archivo, p):
+    if "DISPLAY" not in os.environ:
+        os.environ["DISPLAY"] = ":0"
+    if subprocess.run(["xset", "q"], capture_output=True).returncode != 0:
+        anotar(f"pendiente de decision (sin pantalla): «{p['carpeta']}»")
+        return
+    traba = archivo + ".preguntando"
+    for _ in range(2):
+        try:
+            fd = os.open(traba, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode()); os.close(fd)
+            break
+        except FileExistsError:
+            try:                          # ¿sigue viva la ventana anterior?
+                with open(traba) as f:
+                    os.kill(int(f.read().strip() or 0), 0)
+                return                    # si: no abro otra
+            except (ProcessLookupError, ValueError, PermissionError, OSError):
+                try:
+                    os.remove(traba)      # quedo de un proceso muerto
+                except FileNotFoundError:
+                    pass
+    else:
+        return
+    try:
+        a, c = contar(p["items"])
+        r = subprocess.run(
+            ["zenity", "--question", "--width=520", "--title=OneDrive: se borraron muchos archivos",
+             "--text=En la nube se borraron <b>{} archivos</b>{} de\n«{}», desde otro dispositivo.\n\n"
+             "Esta PC todavia tiene su copia. ¿Que hago?".format(
+                 a, f" y {c} carpetas" if c else "", p["carpeta"]),
+             "--ok-label=Borrarlos también acá", "--cancel-label=Restaurarlos en la nube",
+             "--extra-button=Decidir después"], capture_output=True, text=True)
+        if r.returncode == 0:
+            borrar(archivo, p)
+        elif r.stdout.strip() == "Decidir después" or r.returncode > 1:
+            anotar(f"decision postergada: «{p['carpeta']}»")
+        else:
+            restaurar(archivo, p)
+    finally:
+        os.remove(traba)
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ("--preguntar", "--lista", "--borrar", "--restaurar"):
+        print(__doc__); return
+    modo = sys.argv[1]
+    lista = pendientes()
+    if len(sys.argv) > 2:
+        lista = [x for x in lista if x[0] == os.path.abspath(sys.argv[2])]
+    if modo == "--lista":
+        if not lista:
+            print("No hay borrados masivos esperando decision.")
+        for archivo, p in lista:
+            a, c = contar(p["items"])
+            print(f"{p['carpeta']}: {a} archivos, {c} carpetas (desde {p['creado']})  [{archivo}]")
+        return
+    for archivo, p in lista:
+        {"--preguntar": preguntar, "--borrar": borrar, "--restaurar": restaurar}[modo](archivo, p)
+
+
+if __name__ == "__main__":
+    main()
