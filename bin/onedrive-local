@@ -118,23 +118,20 @@ except Exception: print(\"muy grande para medirla rápido (más de 45 s)\")" 2>/
     # lista todo antes de bajar nada). Nunca sube ni borra en la nube.
     # Si se corta, al retomarlo saltea lo que ya esta y sigue.
     # SALVAGUARDA: es "sync", no "copy". Lo que esta en la PC y ya no esta en
-    # la nube (por ejemplo, borrado desde otro dispositivo mientras bajaba) NO
-    # se queda: si se quedara, el paso 2 lo volveria a subir y reapareceria.
-    # Tampoco se borra: se aparta a $APARTADOS, fuera de OneDrive.
+    # la nube (por ejemplo, borrado desde otro dispositivo mientras bajaba) se
+    # BORRA de la PC: si se quedara, el paso 2 lo volveria a subir y
+    # reapareceria. Lo borrado en la nube sigue en la papelera de OneDrive.
     # --update: lo que la PC tiene mas nuevo que la nube no se pisa; sube en
     # el paso 2, porque es un cambio de verdad.
     # --tpslimit: tope de pedidos por segundo, para quedar debajo del cupo de
     # Microsoft. Pasarse frena TODAS las descargas por minutos.
     TPS="${ONEDRIVE_TPS:-12}"
-    APARTADOS="$HOME/.local/share/onedrive-sync/apartados/$RUTA/$(date +%F_%H%M)"
     touch "$BANDERA"
-    rclone sync "onedrive:$RUTA" "$DESTINO" --update --backup-dir "$APARTADOS" \
+    rclone sync "onedrive:$RUTA" "$DESTINO" --update \
         --transfers "$HILOS" --checkers "$HILOS" --tpslimit "$TPS" --tpslimit-burst "$TPS" \
         --create-empty-src-dirs --exclude ".Trash-*/**" --exclude "*.tmp" \
         --log-file "$REGISTRO" --log-level INFO --stats 1m
     R1=$?
-    N_AP=$(find "$APARTADOS" -type f 2>/dev/null | wc -l)
-    [ "$N_AP" -gt 0 ] && anotar "APARTADOS $N_AP archivos de $RUTA que ya no estan en la nube -> $APARTADOS"
     anotar "COPIA INICIAL TERMINADA $RUTA (codigo $R1); armando la sincronizacion"
     # Paso 2: bisync una vez, para que quede en los dos sentidos. Ya esta todo
     # bajado, asi que solo compara.

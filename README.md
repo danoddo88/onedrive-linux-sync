@@ -93,7 +93,7 @@ Logs live in `~/.config/onedrive-sync/`.
 ## Safety rules
 
 - **Newest wins, always.** Reconciliation uses `--conflict-resolve newer`; the resync when pinning uses `--resync-mode newer` (rclone's default would let the *local* copy win, which can silently overwrite edits made elsewhere between the download and the resync). The fast queue uploads with `--update`, so it never replaces a cloud file that is newer than the local one.
-- **Deleted elsewhere while downloading = not resurrected.** The first pinning step mirrors the cloud onto the disk (`rclone sync`, not `copy`), so a file deleted on another device mid-download does not stay on this PC to be re-uploaded by the resync. It is not deleted either: it is moved to `~/.local/share/onedrive-sync/apartados/<folder>/<date>`, outside OneDrive. Files that are newer on this PC are kept (`--update`) and uploaded.
+- **Deleted elsewhere while downloading = not resurrected.** The first pinning step mirrors the cloud onto the disk (`rclone sync`, not `copy`), so a file deleted on another device mid-download does not stay on this PC to be re-uploaded by the resync. It is deleted from this PC too, as it was in the cloud (the cloud copy stays in OneDrive's recycle bin). Files that are newer on this PC are kept (`--update`) and uploaded.
 - Pinning never deletes anything in the cloud. The one-way "keep uploaded" mode moves replaced or deleted cloud files to `_reemplazados-<host>/` instead of deleting them.
 - OneDrive keeps per-file version history; if something ever goes wrong, that is where to look.
 
