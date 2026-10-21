@@ -36,6 +36,11 @@ OPC="--transfers 8 --checkers 8 --conflict-resolve newer --resilient --recover
 # Bandera que le dice a la cola rapida que se quede quieta mientras
 # comparamos. Sin esto, la cola volveria a subir todo lo que acabamos de bajar.
 BANDERA="${XDG_RUNTIME_DIR:-/tmp}/onedrive-revision-en-curso"
+# Una bandera POR CARPETA: mientras se revisa micro1, el lector y la cola
+# siguen atendiendo las demas carpetas (antes una sola bandera frenaba todo
+# durante los 20-30 min que tarda cada revision grande).
+bandera_poner()  { mkdir -p "$BANDERA"; printf "%s" "$1" > "$BANDERA/$(printf "%s" "$1" | md5sum | cut -c1-32)"; }
+bandera_quitar() { rm -f "$BANDERA/$(printf "%s" "$1" | md5sum | cut -c1-32)"; rmdir "$BANDERA" 2>/dev/null; return 0; }
 # Salvaguarda de borrados masivos (la misma que OneDrive de Microsoft): si una
 # pasada va a borrar MAXBORRAR archivos o mas, se frena y se pregunta.
 MAXBORRAR="${ONEDRIVE_MAX_BORRAR:-200}"
@@ -66,7 +71,7 @@ sincronizar() {
         /usr/local/bin/onedrive-borrados --preguntar >/dev/null 2>&1 &
         return 0
     fi
-    touch "$BANDERA"
+    bandera_poner "$R"
     rclone bisync "$L" "onedrive:$R" $OPC $EXTRA || RES=$?
     # bisync se niega a borrar mas de la mitad de un lado ("Safety abort: too
     # many deletes"). Es la misma situacion que la pregunta de Microsoft:
@@ -89,7 +94,7 @@ sincronizar() {
     # chocamos con una en curso, no es un fallo: la otra esta haciendo el trabajo.
     if [ "$RES" -ne 0 ] && tail -15 "$REGISTRO" 2>/dev/null | grep -q "prior lock file found"; then
         anotar "SALTEADA $R: ya hay otra revision en curso"
-        sleep 2; rm -f "$BANDERA"; return 0
+        sleep 2; bandera_quitar "$R"; return 0
     fi
     if [ "$RES" -ne 0 ] && [ -z "$EXTRA" ] && tail -40 "$REGISTRO" 2>/dev/null | grep -qE "cannot find prior Path1 or Path2 listings|Must run --resync to recover"; then
         anotar "RECUPERANDO $R: resincronizacion (gana el mas nuevo)"
@@ -100,7 +105,7 @@ sincronizar() {
     # Margen de 2 segundos: los avisos del nucleo llegan con retraso y sin
     # esta pausa la cola alcanzaria a ver los archivos recien bajados.
     sleep 2
-    rm -f "$BANDERA"
+    bandera_quitar "$R"
     # (las marcas las mantiene onedrive-marcas-vivas, en la carpeta que miras)
     return $RES
 }
@@ -166,7 +171,7 @@ except Exception: print(\"muy grande para medirla rápido (más de 45 s)\")" 2>/
     # --tpslimit: tope de pedidos por segundo, para quedar debajo del cupo de
     # Microsoft. Pasarse frena TODAS las descargas por minutos.
     TPS="${ONEDRIVE_TPS:-12}"
-    touch "$BANDERA"
+    bandera_poner "$RUTA"
     # --max-delete + --delete-after: primero baja todo; si al final tendria que
     # borrar MAXBORRAR archivos o mas de esta PC, no borra y pregunta (abajo).
     OPC1="--update --transfers $HILOS --checkers $HILOS --tpslimit $TPS --tpslimit-burst $TPS
@@ -181,7 +186,7 @@ except Exception: print(\"muy grande para medirla rápido (más de 45 s)\")" 2>/
                        rclone sync "onedrive:$RUTA" "$DESTINO" $OPC1 "${EXC[@]}" --delete-after; R1=$? ;;
             restaurar) anotar "DECISION restaurar en $RUTA (los sube el paso 2)"; R1=0 ;;
             *)         anotar "DECISION postergada en $RUTA: queda sin terminar; se vuelve a preguntar al retomar"
-                       exec 9>&-; exit 3 ;;
+                       bandera_quitar "$RUTA"; exec 9>&-; exit 3 ;;
         esac
     fi
     anotar "COPIA INICIAL TERMINADA $RUTA (codigo $R1); armando la sincronizacion"

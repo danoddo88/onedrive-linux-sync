@@ -23,6 +23,16 @@ RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; : "${RT:?}"
 ENTRADA="$RT/onedrive-cola/entrada"
 PROCESO="$RT/onedrive-cola/proceso"
 BANDERA="$RT/onedrive-revision-en-curso"
+# ¿Esta ruta cae en una carpeta que la revision completa esta recorriendo?
+en_revision() {
+    local F C
+    for F in "$BANDERA"/*; do
+        [ -f "$F" ] || continue
+        C=$(cat "$F" 2>/dev/null); [ -n "$C" ] || continue
+        case "$1" in "$C"|"$C"/*) return 0 ;; esac
+    done
+    return 1
+}
 IGNORAR="$RT/onedrive-cola/ignorar"   # avisos de onedrive-delta: "esto lo baje yo"
 LOTE="$RT/onedrive-cola/lote.txt"
 EN_CURSO="$HOME/.config/onedrive-sync/en-curso.conf"
@@ -64,7 +74,6 @@ trap 'kill %1 2>/dev/null' EXIT
 
 # ---- REPARTIDOR -----------------------------------------------------------
 while true; do
-    if [ -e "$BANDERA" ]; then sleep 2; continue; fi
     if [ -z "$(ls -A "$ENTRADA" 2>/dev/null)" ]; then sleep 1; continue; fi
 
     # Rotacion atomica: lo que llegue de ahora en mas cae en una entrada nueva
@@ -73,15 +82,20 @@ while true; do
     mkdir -p "$ENTRADA"
 
     : > "$LOTE"
+    DIFERIDOS=0
     for F in "$PROCESO"/*; do
         [ -f "$F" ] || continue
         R=$(cat "$F" 2>/dev/null)
-        [ -n "$R" ] && printf "%s\n" "$R" >> "$LOTE"
+        [ -n "$R" ] || continue
+        # Su carpeta esta en revision completa: vuelve a la cola y se sube despues
+        if en_revision "$R"; then printf "%s" "$R" > "$ENTRADA/$(basename "$F")"; DIFERIDOS=$((DIFERIDOS+1)); continue; fi
+        printf "%s\n" "$R" >> "$LOTE"
     done
     find "$PROCESO" -maxdepth 1 -type f -delete
     rmdir "$PROCESO" 2>/dev/null
 
     N=$(wc -l < "$LOTE")
+    [ "$N" -eq 0 ] && [ "$DIFERIDOS" -gt 0 ] && sleep 3
     [ "$N" -gt 1 ] && anotar "lote de $N archivos, de a $PARALELO en paralelo"
     [ "$N" -gt 0 ] && xargs -a "$LOTE" -d "\n" -P "$PARALELO" -I{} /usr/local/bin/onedrive-subir-uno "{}"
 done
