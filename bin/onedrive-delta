@@ -272,6 +272,8 @@ def bajar(item, ruta):
         shutil.copyfileobj(r, f, 1 << 20)
     os.utime(tmp, (mt, mt))
     avisar_cola(ruta, mt)
+    if os.path.isdir(destino) and not os.path.islink(destino):
+        shutil.rmtree(destino)          # en la nube ahora es un archivo (p. ej. .git carpeta -> .git puntero)
     os.replace(tmp, destino)
     marcar(ruta)
     return "bajado"
