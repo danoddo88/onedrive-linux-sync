@@ -36,6 +36,8 @@ CONF = f"{HOME}/.config/onedrive-sync"
 FIJADAS = f"{CONF}/fijadas.conf"
 LOCAL = f"{HOME}/.onedrive-local"
 NUBE = f"{HOME}/OneDrive"
+CACHE = f"{HOME}/.cache/rclone/vfs/onedrive"       # lo abierto alguna vez por el montaje
+CACHE_META = f"{HOME}/.cache/rclone/vfsMeta/onedrive"
 ESTADO = f"{CONF}/delta.json"
 DB = f"{CONF}/delta-ids.sqlite"
 REGISTRO = f"{CONF}/historial-delta.log"
@@ -519,6 +521,43 @@ def encolar_subida(ruta):
         f.write(ruta)
 
 
+# ---- archivos "abiertos alguna vez" (cache del montaje) -----------------------
+# rclone no refresca solo un archivo en cache cuando cambia en la nube (probado
+# el 2026-10-22: 4 min sin verlo). Lo hacemos aca: se saca de la cache y se
+# vuelve a leer por el montaje, asi lo que abriste queda al dia, como en Windows.
+def en_cache(ruta):
+    return os.path.isfile(f"{CACHE}/{ruta}")
+
+
+def cache_sucia(ruta):
+    """True si tiene cambios locales todavia sin subir (no tocar)."""
+    try:
+        with open(f"{CACHE_META}/{ruta}") as f:
+            return bool(json.load(f).get("Dirty"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+
+def vaciar_cache(ruta):
+    for p in (f"{CACHE}/{ruta}", f"{CACHE_META}/{ruta}"):
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+
+
+def rehidratar(ruta):
+    def leer():
+        time.sleep(8)
+        try:
+            with open(f"{NUBE}/{ruta}", "rb") as f:
+                while f.read(1 << 20):
+                    pass
+        except OSError as e:
+            anotar(f"no pude volver a bajar {ruta}: {e}")
+    threading.Thread(target=leer, daemon=True).start()
+
+
 def aplicar(item):
     item_id = item["id"]
     if item.get("name") == "root" and "parentReference" not in item:
@@ -534,6 +573,9 @@ def aplicar(item):
             return                      # nunca lo vimos: lo resolvera la revision
         fij = carpeta_fijada_de(ruta)
         if not fij:
+            if en_cache(ruta) and not cache_sucia(ruta):
+                vaciar_cache(ruta)
+                anotar(f"QUITADO de esta PC (borrado en la nube): {ruta}")
             olvidar(item_id)
             return
         if ruta == fij:
@@ -576,6 +618,19 @@ def aplicar(item):
             elif os.path.lexists(d):
                 os.remove(d)
             anotar(f"MOVIDO FUERA de la carpeta guardada: {antes} -> {ruta}")
+        if antes and antes != ruta and en_cache(antes) and not cache_sucia(antes):
+            vaciar_cache(antes)           # renombrado en la nube: la copia vieja sobra
+        if "file" in item and en_cache(ruta):
+            try:
+                st = os.stat(f"{CACHE}/{ruta}")
+                if (abs(st.st_mtime - fecha(item)) >= 2 or st.st_size != item.get("size", -1)) and not cache_sucia(ruta):
+                    vaciar_cache(ruta)
+                    rehidratar(ruta)
+                    anotar(f"ACTUALIZADO en esta PC (abierto alguna vez): {ruta}")
+            except OSError:
+                pass
+            recordar(item_id, ruta)       # para ubicar un borrado o renombre futuro
+            return
         olvidar(item_id)
         return
 

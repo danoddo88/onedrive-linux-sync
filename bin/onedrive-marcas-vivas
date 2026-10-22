@@ -6,7 +6,9 @@
 #  (Nemo o Thunar) y
 #  esta mostrando una carpeta de ~/OneDrive que no se marco hace poco, pone
 #  la marca a cada archivo y subcarpeta de ESE nivel:
-#     tilde verde   esta en esta PC (carpeta guardada, o adentro de una)
+#     tilde verde   esta en esta PC (carpeta guardada, o abierto alguna vez:
+#                   lo que abris queda guardado en esta PC, como en Windows)
+#     flechas       bajando (o terminando de bajar un archivo abierto a medias)
 #     globo         solo en la nube
 #  Si cambio alguna marca, recarga la ventana (Ctrl+R; F5 no relee las marcas), porque el explorador no
 #  se entera solo de que una marca cambio.
@@ -45,8 +47,27 @@ marca_deseada() {     # $1 = ruta relativa dentro de OneDrive, $2 = ruta absolut
             esac
         done < "$EN_CURSO"
     fi
-    # 3. el resto: solo en la nube
+    # 3. abierto alguna vez y guardado en esta PC (cache de rclone, que no
+    #    vence): tilde. Si quedo a medio bajar (una app leyo solo una parte),
+    #    se termina de bajar en segundo plano para que quede entero.
+    if [ -f "$A" ] && [ -f "$CACHE/$R" ]; then
+        if cache_completa "$CACHE/$R"; then echo emblem-default; return; fi
+        hidratar "$A"; echo emblem-synchronizing; return
+    fi
+    # 4. el resto: solo en la nube
     echo emblem-web
+}
+
+CACHE="$HOME/.cache/rclone/vfs/onedrive"
+cache_completa() {    # un archivo a medio bajar es "sparse": tiene menos bloques que tamano
+    local S B; read -r S B < <(stat -c "%s %b" "$1" 2>/dev/null) || return 1
+    [ $(( B * 512 + 65536 )) -ge "$S" ]
+}
+declare -A HIDRATANDO
+hidratar() {          # leer el archivo entero por el montaje, una vez, en segundo plano
+    [ -n "${HIDRATANDO[$1]:-}" ] && return
+    HIDRATANDO[$1]=1
+    ( cat "$1" > /dev/null 2>&1 ) &
 }
 
 marcar_carpeta() {    # $1 = carpeta absoluta; imprime cuantas marcas cambio

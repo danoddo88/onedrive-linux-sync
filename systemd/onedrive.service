@@ -9,7 +9,7 @@ ExecStart=/usr/bin/rclone mount onedrive: %h/OneDrive \
   --allow-other \
   --vfs-cache-mode full \
   --vfs-cache-max-size 250G \
-  --vfs-cache-max-age 8760h \
+  --vfs-cache-max-age 876000h \
   --vfs-cache-poll-interval 5m \
   --cache-dir %h/.cache/rclone \
   --dir-cache-time 168h \
