@@ -111,16 +111,7 @@ trap 'kill %1 2>/dev/null' EXIT
 (
   while true; do
       sleep 10
-      for F in "$BORRADOS"/*; do
-          [ -f "$F" ] || continue
-          [ $(( $(date +%s) - $(stat -c %Y "$F") )) -ge 20 ] || continue
-          IFS=$'\t' read -r R TS < "$F"
-          [ -n "$R" ] || { rm -f "$F"; continue; }
-          en_revision "$R" && continue          # su carpeta esta en revision: la revision lo concilia
-          rm -f "$F"
-          /usr/local/bin/onedrive-borrar-uno "$R" "${TS:-0}" &
-      done
-      wait
+      /usr/local/bin/onedrive-borrar-lote     # agrupa por carpeta, espera 20 s, de a 4
   done
 ) &
 

@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Procesa las fichas de borrado/renombrado local que deja la cola
+($XDG_RUNTIME_DIR/onedrive-cola/borrados). Lo llama onedrive-cola cada 10 s.
+
+- Una ficha se atiende recien a los 20 s (un renombrado de ida y vuelta o un
+  archivo recreado no borra nada).
+- Si hay una ficha de una carpeta, las de lo que cuelga de ella se descartan:
+  la carpeta se borra entera con onedrive-borrar-uno, que es quien cuenta y
+  pregunta si son muchos. Asi un `rm -r` de 250 archivos no hace 250 pedidos.
+- Mientras la carpeta primaria esta en revision completa, se espera.
+- Como mucho 4 borrados a la vez.
+"""
+import hashlib, os, subprocess, sys, time
+from concurrent.futures import ThreadPoolExecutor
+
+RT = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+BORRADOS = f"{RT}/onedrive-cola/borrados"
+BANDERA = f"{RT}/onedrive-revision-en-curso"
+HOME = os.path.expanduser("~")
+FIJADAS = f"{HOME}/.config/onedrive-sync/fijadas.conf"
+DEMORA = 20
+
+
+def fijadas():
+    try:
+        with open(FIJADAS) as f:
+            return [l.strip().strip("/") for l in f if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def en_revision(ruta):
+    for r in fijadas():
+        if (ruta == r or ruta.startswith(r + "/")) and \
+           os.path.exists(f"{BANDERA}/{hashlib.md5(r.encode()).hexdigest()}"):
+            return True
+    return False
+
+
+def main():
+    if not os.path.isdir(BORRADOS):
+        return
+    ahora = time.time()
+    fichas = {}                       # ruta -> (archivo, ts_evento, edad)
+    for n in os.listdir(BORRADOS):
+        p = f"{BORRADOS}/{n}"
+        try:
+            with open(p) as f:
+                ruta, _, ts = f.read().partition("\t")
+            edad = ahora - os.path.getmtime(p)
+        except OSError:
+            continue
+        if not ruta:
+            os.remove(p); continue
+        fichas[ruta] = (p, ts.strip() or "0", edad)
+    if not fichas:
+        return
+    rutas = set(fichas)
+    listas = []
+    for ruta, (p, ts, edad) in fichas.items():
+        # ¿cuelga de otra ficha? la carpeta se encarga
+        partes = ruta.split("/")
+        if any("/".join(partes[:i]) in rutas for i in range(1, len(partes))):
+            os.remove(p); continue
+        if edad < DEMORA or en_revision(ruta):
+            continue
+        os.remove(p)
+        listas.append((ruta, ts))
+    if not listas:
+        return
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda x: subprocess.run(["/usr/local/bin/onedrive-borrar-uno", x[0], x[1]]), listas))
+
+
+if __name__ == "__main__":
+    main()

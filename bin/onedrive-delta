@@ -45,6 +45,7 @@ BANDERA = f"{RT}/onedrive-revision-en-curso"   # carpeta: un archivo por carpeta
 DIFERIDOS = f"{CONF}/delta-diferidos.json"      # cambios que esperan a que termine la revision de su carpeta
 APRENDIDAS_ARCH = f"{CONF}/delta-aprendidas.txt"
 IGNORAR = f"{RT}/onedrive-cola/ignorar"     # avisos a la cola: "esto lo baje yo, no lo subas"
+SUBIDOS = f"{RT}/onedrive-delta/subidos"    # avisos de la cola: "esto lo subi yo, no lo bajes"
 INTERVALO = int(os.environ.get("ONEDRIVE_DELTA_SEG", "30"))
 # La misma salvaguarda que OneDrive de Microsoft: si en una pasada la nube
 # borro muchos archivos de una carpeta guardada, no se borran aca sin
@@ -56,6 +57,7 @@ TEMP = ".odtmp-"
 
 os.makedirs(CONF, exist_ok=True)
 os.makedirs(IGNORAR, exist_ok=True)
+os.makedirs(SUBIDOS, exist_ok=True)
 os.makedirs(PENDIENTES, exist_ok=True)
 
 
@@ -165,6 +167,7 @@ def carpeta_fijada_de(ruta):
 # ---- id -> ruta ------------------------------------------------------------
 db = sqlite3.connect(DB, check_same_thread=False)
 db.execute("CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, ruta TEXT NOT NULL)")
+db.execute("CREATE TABLE IF NOT EXISTS bajados (ruta TEXT PRIMARY KEY, mtime REAL NOT NULL)")
 db.execute("CREATE INDEX IF NOT EXISTS ix_ruta ON items(ruta)")
 db_lock = threading.Lock()
 
@@ -271,10 +274,39 @@ def marcar(ruta):
                        capture_output=True)
 
 
+def subido_por_mi(ruta, mt):
+    """¿Este cambio de la nube es una subida de la cola? Entonces no se baja."""
+    import hashlib
+    p = f"{SUBIDOS}/{hashlib.md5(ruta.encode()).hexdigest()}"
+    try:
+        with open(p) as f:
+            m = float(f.read().strip() or 0)
+    except (FileNotFoundError, ValueError):
+        return False
+    if abs(m - mt) < 2:
+        os.remove(p)
+        return True
+    return False
+
+
+def recordar_bajada(ruta, mt):
+    with db_lock:
+        db.execute("INSERT OR REPLACE INTO bajados VALUES (?,?)", (ruta, mt))
+        db.commit()
+
+
+def bajada_registrada(ruta):
+    with db_lock:
+        r = db.execute("SELECT mtime FROM bajados WHERE ruta=?", (ruta,)).fetchone()
+    return r[0] if r else None
+
+
 def bajar(item, ruta):
     destino = f"{LOCAL}/{ruta}"
     mt = fecha(item)
     tam = item.get("size", -1)
+    if subido_por_mi(ruta, mt):
+        return "subido-por-mi"
     if os.path.isfile(destino):
         st = os.stat(destino)
         if st.st_size == tam and abs(st.st_mtime - mt) < 2:
@@ -311,6 +343,7 @@ def bajar(item, ruta):
     if os.path.isdir(destino) and not os.path.islink(destino):
         shutil.rmtree(destino)          # en la nube ahora es un archivo (p. ej. .git carpeta -> .git puntero)
     os.replace(tmp, destino)
+    recordar_bajada(ruta, mt)
     marcar(ruta)
     return "bajado"
 
@@ -453,16 +486,24 @@ def aplicar_borrados(borrados):
 def editados_recien(destino):
     """Rutas relativas de archivos bajo destino modificados despues de la ultima pasada."""
     limite = ULTIMA_PASADA - 60
+
+    def editado(p):
+        mt = os.path.getmtime(p)
+        if mt <= limite:
+            return False
+        b = bajada_registrada(p[len(LOCAL) + 1:])
+        return b is None or abs(b - mt) >= 2      # lo que bajo el lector no cuenta
+
     out = []
     if os.path.isfile(destino):
-        if os.path.getmtime(destino) > limite:
+        if editado(destino):
             out.append(destino[len(LOCAL) + 1:])
     elif os.path.isdir(destino) and not os.path.islink(destino):
         for base, _, fs in os.walk(destino):
             for f in fs:
                 p = f"{base}/{f}"
                 try:
-                    if os.path.getmtime(p) > limite:
+                    if editado(p):
                         out.append(p[len(LOCAL) + 1:])
                 except OSError:
                     pass

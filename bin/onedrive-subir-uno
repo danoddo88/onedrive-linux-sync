@@ -14,6 +14,10 @@ I=$(date +%s%3N)
 # vieja. Un cambio hecho aca siempre es mas nuevo que la nube, asi que sube.
 if rclone copyto "$A" "onedrive:$REL" --no-traverse --update --log-level ERROR 2>>"$REGISTRO"; then
     echo "$(date "+%F %T")  SUBIDO en $(( $(date +%s%3N) - I )) ms: $REL" >> "$REGISTRO"
+    # Aviso al lector delta: este cambio de la nube es mio, no lo bajes de
+    # vuelta (si el archivo se renombro o borro justo despues, resucitaba).
+    mkdir -p "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/onedrive-delta/subidos"
+    stat -c %Y "$A" > "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/onedrive-delta/subidos/$(printf "%s" "$REL" | md5sum | cut -d" " -f1)" 2>/dev/null
     # tilde verde: ya esta en esta PC y ya esta en la nube
     gio set -t stringv "$A" metadata::emblems emblem-default 2>/dev/null
     # y tambien por la ruta unificada, que es la que se ve
