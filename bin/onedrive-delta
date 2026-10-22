@@ -275,13 +275,30 @@ def bajar(item, ruta):
         if st.st_mtime > mt + 2:
             anotar(f"LOCAL MAS NUEVO, no bajo: {ruta}")
             return "local-mas-nuevo"
-    url = url_descarga(item["id"])
-    if not url:
-        raise RuntimeError("sin direccion de descarga")
     os.makedirs(os.path.dirname(destino), exist_ok=True)
     tmp = f"{os.path.dirname(destino)}/{TEMP}{os.path.basename(destino)}"
-    with urllib.request.urlopen(url, timeout=600) as r, open(tmp, "wb") as f:
-        shutil.copyfileobj(r, f, 1 << 20)
+    # Microsoft frena (429/503) cuando llegan muchos cambios juntos: esperar lo
+    # que pide y reintentar, en vez de perder el archivo hasta la revision.
+    for intento in range(4):
+        try:
+            url = url_descarga(item["id"])
+            if not url:
+                raise RuntimeError("sin direccion de descarga")
+            with urllib.request.urlopen(url, timeout=600) as r, open(tmp, "wb") as f:
+                shutil.copyfileobj(r, f, 1 << 20)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503, 504) and intento < 3:
+                espera = min(int(e.headers.get("Retry-After", "20") or 20), 120)
+                anotar(f"Microsoft pide esperar {espera} s para bajar {ruta} (HTTP {e.code})")
+                time.sleep(espera)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if intento < 3:
+                time.sleep(10 * (intento + 1))
+                continue
+            raise
     os.utime(tmp, (mt, mt))
     avisar_cola(ruta, mt)
     if os.path.isdir(destino) and not os.path.islink(destino):
@@ -349,17 +366,20 @@ def diferir(fij, item):
 
 
 def aplicar_diferidos():
-    d = _leer_diferidos()
-    for fij in list(d):
-        if en_revision(fij):
+    for fij in list(_leer_diferidos()):
+        if fij != "__reintentos__" and en_revision(fij):
             continue
-        items = d.pop(fij)
+        d = _leer_diferidos()                 # releer: tratar() puede haber agregado reintentos
+        items = d.pop(fij, [])
         _guardar_diferidos(d)
+        if not items:
+            continue
         borrados = []
         for it in items:
             tratar(it, borrados, diferible=False)
         aplicar_borrados(borrados)
-        anotar(f"aplicados {len(items)} cambios que esperaban por la revision de «{fij}»")
+        if fij != "__reintentos__":
+            anotar(f"aplicados {len(items)} cambios que esperaban por la revision de «{fij}»")
 
 
 def carpeta_del_item(item):
@@ -384,7 +404,13 @@ def tratar(item, borrados, diferible=True):
         aplicar(item)
         return 1
     except Exception as ex:
-        anotar(f"no pude aplicar {item.get('name')}: {ex}")
+        n = int(item.get("_reintentos", 0))
+        if n < 5:
+            item["_reintentos"] = n + 1
+            diferir("__reintentos__", item)
+            anotar(f"no pude aplicar {item.get('name')}: {ex}; lo reintento ({n + 1}/5)")
+        else:
+            anotar(f"no pude aplicar {item.get('name')} tras 5 intentos: {ex}; lo resolvera la revision")
         return 0
 
 
@@ -402,6 +428,34 @@ def aplicar_borrados(borrados):
             continue
         for item, ruta in lista:
             aplicar(item)
+
+
+def editados_recien(destino):
+    """Rutas relativas de archivos bajo destino modificados despues de la ultima pasada."""
+    limite = ULTIMA_PASADA - 60
+    out = []
+    if os.path.isfile(destino):
+        if os.path.getmtime(destino) > limite:
+            out.append(destino[len(LOCAL) + 1:])
+    elif os.path.isdir(destino) and not os.path.islink(destino):
+        for base, _, fs in os.walk(destino):
+            for f in fs:
+                p = f"{base}/{f}"
+                try:
+                    if os.path.getmtime(p) > limite:
+                        out.append(p[len(LOCAL) + 1:])
+                except OSError:
+                    pass
+    return out
+
+
+def encolar_subida(ruta):
+    """Deja una ficha en la cola rapida para que suba ese archivo."""
+    import hashlib
+    entrada = f"{RT}/onedrive-cola/entrada"
+    os.makedirs(entrada, exist_ok=True)
+    with open(f"{entrada}/{hashlib.md5(ruta.encode()).hexdigest()}", "w") as f:
+        f.write(ruta)
 
 
 def aplicar(item):
@@ -425,6 +479,16 @@ def aplicar(item):
             anotar(f"ATENCION: la carpeta guardada «{ruta}» fue borrada en la nube. No toco la copia local.")
             return
         destino = f"{LOCAL}/{ruta}"
+        # SALVAGUARDA: si el archivo se edito en esta PC despues de la ultima
+        # pasada (o sea, despues de que lo borraran en la nube), no se pierde:
+        # se conserva y se vuelve a subir.
+        recientes = editados_recien(destino)
+        if recientes:
+            for r in recientes:
+                encolar_subida(r)
+            anotar(f"CONSERVADO (editado aca despues del borrado en la nube), lo vuelvo a subir: {ruta}")
+            olvidar(item_id, ruta, es_carpeta=True)
+            return
         if os.path.isdir(destino) and not os.path.islink(destino):
             shutil.rmtree(destino, ignore_errors=True)
             anotar(f"BORRADA carpeta: {ruta}")
@@ -481,7 +545,12 @@ def leer_estado():
         return None
 
 
+ULTIMA_PASADA = time.time()
+
+
 def guardar_estado(link):
+    global ULTIMA_PASADA
+    ULTIMA_PASADA = time.time()
     tmp = ESTADO + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"deltaLink": link, "guardado": time.strftime("%F %T")}, f)

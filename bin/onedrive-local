@@ -29,8 +29,12 @@ aviso()   { grafico && notify-send -i folder-download "OneDrive" "$1" 2>/dev/nul
 error()   { grafico && zenity --error --width=440 --text="$1" 2>/dev/null; echo "ERROR: $1" >&2; exit 1; }
 anotar()  { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
 
+# filtros-revision.txt: nombres que OneDrive no acepta (" * : < > ? |). Un solo
+# archivo asi hacia abortar la revision de toda la carpeta (2026-10-22).
+FILTROS="$CONF/filtros-revision.txt"
+printf '%s\n' '- .Trash-*/**' '- *.tmp' '- {{.*[":*<>?|\\].*}}' > "$FILTROS"
 OPC="--transfers 8 --checkers 8 --conflict-resolve newer --resilient --recover
-     --create-empty-src-dirs --exclude .Trash-*/** --exclude *.tmp
+     --create-empty-src-dirs --filter-from $FILTROS
      --log-file $REGISTRO --log-level INFO"
 
 # Bandera que le dice a la cola rapida que se quede quieta mientras

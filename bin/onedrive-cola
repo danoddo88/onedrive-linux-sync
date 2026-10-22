@@ -60,6 +60,17 @@ anotar "cola iniciada (hasta $PARALELO subidas en paralelo)"
           done < "$EN_CURSO"
           [ "$SALTAR" = 1 ] && continue
       fi
+      # Nombres que OneDrive no acepta (" * : < > ? | \, espacio o punto al
+      # final). rclone los disfraza y la Mac crea otra copia: quedan dos
+      # archivos y la revision aborta. No se suben; se avisa una vez.
+      if printf "%s" "$REL" | grep -qE '[":*<>?|\\]|(^| |/)[^/]* (/|$)|\.(/|$)'; then
+          if ! grep -qxF "$REL" "$HOME/.config/onedrive-sync/nombres-prohibidos.txt" 2>/dev/null; then
+              printf "%s\n" "$REL" >> "$HOME/.config/onedrive-sync/nombres-prohibidos.txt"
+              anotar "NO SUBO (nombre prohibido por OneDrive): $REL"
+              DISPLAY="${DISPLAY:-:0}" notify-send -u critical -i dialog-warning "OneDrive: nombre no permitido" "No se puede subir «$(basename "$REL")»: OneDrive no acepta \" * : < > ? | ni espacio o punto al final. Renombralo." 2>/dev/null
+          fi
+          continue
+      fi
       NOMBRE=$(printf "%s" "$REL" | md5sum | cut -d" " -f1)
       # Lo que acaba de bajar onedrive-delta desde la nube no se sube de
       # vuelta: deja un aviso con la fecha que le puso al archivo.
