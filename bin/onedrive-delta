@@ -258,6 +258,13 @@ def avisar_cola(ruta, mtime):
         f.write(str(int(mtime)))
 
 
+def avisar_cola_borrado(ruta):
+    """Aviso a la cola: este borrado viene de la nube, no lo repitas alla."""
+    import hashlib
+    with open(f"{IGNORAR}/{hashlib.md5(ruta.encode()).hexdigest()}", "w") as f:
+        f.write("borrado")
+
+
 def marcar(ruta):
     for base in (LOCAL, NUBE):
         subprocess.run(["gio", "set", "-t", "stringv", f"{base}/{ruta}", "metadata::emblems", "emblem-default"],
@@ -382,6 +389,18 @@ def aplicar_diferidos():
             anotar(f"aplicados {len(items)} cambios que esperaban por la revision de «{fij}»")
 
 
+REVISIONES_PEDIDAS = {}
+
+
+def pedir_revision(fij):
+    """Revision completa de una carpeta, bajo demanda (como mucho una por hora por carpeta)."""
+    if not fij or time.time() - REVISIONES_PEDIDAS.get(fij, 0) < 3600:
+        return
+    REVISIONES_PEDIDAS[fij] = time.time()
+    subprocess.Popen(["/usr/local/bin/onedrive-local", "--ahora", f"{NUBE}/{fij}"], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, env={**os.environ, "DISPLAY": ""})
+
+
 def carpeta_del_item(item):
     return carpeta_fijada_de(ruta_de(item) or "") or carpeta_fijada_de(ruta_recordada(item["id"]) or "")
 
@@ -410,7 +429,8 @@ def tratar(item, borrados, diferible=True):
             diferir("__reintentos__", item)
             anotar(f"no pude aplicar {item.get('name')}: {ex}; lo reintento ({n + 1}/5)")
         else:
-            anotar(f"no pude aplicar {item.get('name')} tras 5 intentos: {ex}; lo resolvera la revision")
+            anotar(f"no pude aplicar {item.get('name')} tras 5 intentos: {ex}; pido una revision de su carpeta")
+            pedir_revision(carpeta_del_item(item))
         return 0
 
 
@@ -490,9 +510,14 @@ def aplicar(item):
             olvidar(item_id, ruta, es_carpeta=True)
             return
         if os.path.isdir(destino) and not os.path.islink(destino):
+            for base, ds, fs in os.walk(destino):
+                for n in fs + ds:
+                    avisar_cola_borrado(f"{base}/{n}"[len(LOCAL) + 1:])
+            avisar_cola_borrado(ruta)
             shutil.rmtree(destino, ignore_errors=True)
             anotar(f"BORRADA carpeta: {ruta}")
         elif os.path.lexists(destino):
+            avisar_cola_borrado(ruta)
             os.remove(destino)
             anotar(f"BORRADO: {ruta}")
         olvidar(item_id, ruta, es_carpeta=True)

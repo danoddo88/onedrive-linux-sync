@@ -37,19 +37,43 @@ IGNORAR="$RT/onedrive-cola/ignorar"   # avisos de onedrive-delta: "esto lo baje 
 LOTE="$RT/onedrive-cola/lote.txt"
 EN_CURSO="$HOME/.config/onedrive-sync/en-curso.conf"
 PARALELO=4
+BORRADOS=$RT/onedrive-cola/borrados   # fichas de borrados/renombrados locales (se aplican a los 20 s)
 
-mkdir -p "$IGNORAR" "$LOCAL" "$HOME/.config/onedrive-sync" "$ENTRADA"
+mkdir -p "$IGNORAR" "$BORRADOS" "$LOCAL" "$HOME/.config/onedrive-sync" "$ENTRADA"
 anotar() { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
 anotar "cola iniciada (hasta $PARALELO subidas en paralelo)"
 
 # ---- ANOTADOR -------------------------------------------------------------
 (
-  inotifywait -m -r -q -e close_write -e moved_to --format "%w%f" \
+  inotifywait -m -r -q -e close_write -e moved_to -e moved_from -e delete --format "%e|%w%f" \
       --exclude '(\.goutputstream|\.swp$|\.tmp$|~$|/\.git/|/\.odtmp-)' "$LOCAL" 2>/dev/null |
-  while IFS= read -r A; do
-      [ -f "$A" ] || continue
+  while IFS= read -r LINEA; do
+      EV="${LINEA%%|*}"; A="${LINEA#*|}"
       REL="${A#$LOCAL/}"
       [ "$REL" = "$A" ] && continue
+      case "$EV" in
+        *MOVED_FROM*|*DELETE*)
+          # Borrado o renombrado local: ficha para borrar en la nube (con demora).
+          # Si lo borro el lector (viene de la nube) o la revision completa
+          # (ya lo concilio), no hay nada que hacer.
+          NOMBRE=$(printf "%s" "$REL" | md5sum | cut -d" " -f1)
+          if [ -f "$IGNORAR/$NOMBRE" ] && [ "$(cat "$IGNORAR/$NOMBRE" 2>/dev/null)" = "borrado" ]; then rm -f "$IGNORAR/$NOMBRE"; continue; fi
+          en_revision "$REL" && continue
+          if [ -s "$EN_CURSO" ]; then
+              SALTAR=0
+              while IFS= read -r F; do [ -n "$F" ] && case "$REL" in "$F"/*) SALTAR=1; break ;; esac; done < "$EN_CURSO"
+              [ "$SALTAR" = 1 ] && continue
+          fi
+          printf "%s\t%s" "$REL" "$(date +%s)" > "$BORRADOS/$NOMBRE" 2>/dev/null
+          continue ;;
+        *MOVED_TO*ISDIR*)
+          # Carpeta movida/renombrada hacia aca: subir todo lo que tiene.
+          find "$A" -type f -not -path "*/.git/*" 2>/dev/null | while IFS= read -r F; do
+              R2="${F#$LOCAL/}"; printf "%s" "$R2" > "$ENTRADA/$(printf "%s" "$R2" | md5sum | cut -d" " -f1)" 2>/dev/null
+          done
+          continue ;;
+      esac
+      [ -f "$A" ] || continue
       # Lo que esta bajando "Mantener siempre en esta PC" viene de la nube:
       # no hay que subirlo de vuelta. Sin esto, cada archivo descargado volvia
       # a la nube y saturaba la conexion (2026-10-19: 22.000 avisos de mas).
@@ -82,6 +106,23 @@ anotar "cola iniciada (hasta $PARALELO subidas en paralelo)"
   done
 ) &
 trap 'kill %1 2>/dev/null' EXIT
+
+# ---- BORRADOS (con 20 s de demora, para que un renombrado se asiente) ---------
+(
+  while true; do
+      sleep 10
+      for F in "$BORRADOS"/*; do
+          [ -f "$F" ] || continue
+          [ $(( $(date +%s) - $(stat -c %Y "$F") )) -ge 20 ] || continue
+          IFS=$'\t' read -r R TS < "$F"
+          [ -n "$R" ] || { rm -f "$F"; continue; }
+          en_revision "$R" && continue          # su carpeta esta en revision: la revision lo concilia
+          rm -f "$F"
+          /usr/local/bin/onedrive-borrar-uno "$R" "${TS:-0}" &
+      done
+      wait
+  done
+) &
 
 # ---- REPARTIDOR -----------------------------------------------------------
 while true; do

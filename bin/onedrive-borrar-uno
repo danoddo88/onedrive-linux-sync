@@ -1,0 +1,68 @@
+#!/bin/bash
+# Un archivo o carpeta borrado (o renombrado) en esta PC: borrarlo tambien en la
+# nube. Lo llama la cola, con 20 s de demora, para que un renombrado de ida y
+# vuelta o un archivo recreado no borre nada.
+#   onedrive-borrar-uno <ruta relativa> <epoch del evento>
+# Salvaguardas:
+#   - si volvio a existir aca, no se toca;
+#   - si en la nube lo cambiaron DESPUES del borrado (otro dispositivo), no se
+#     borra: el lector lo vuelve a bajar;
+#   - una carpeta con MAXBORRAR archivos o mas no se borra sin preguntar
+#     (onedrive-borrados: borrar en la nube / restaurar aca / despues).
+set -u
+LOCAL="$HOME/.onedrive-local"
+CONF="$HOME/.config/onedrive-sync"
+REGISTRO="$CONF/historial-cola.log"
+MAXBORRAR="${ONEDRIVE_MAX_BORRAR:-200}"
+REL="$1"; TS="${2:-0}"
+anotar() { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
+
+[ -e "$LOCAL/$REL" ] && exit 0                       # volvio a existir
+J=$(rclone lsjson --stat "onedrive:$REL" 2>/dev/null) || exit 0   # ya no esta en la nube
+read -r ESDIR MOD < <(printf "%s" "$J" | python3 -c '
+import sys, json
+from datetime import datetime
+d = json.load(sys.stdin)
+m = d.get("ModTime", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
+m = m[:26] + m[-6:] if "." in m and len(m) > 32 else m
+print("si" if d.get("IsDir") else "no", int(datetime.fromisoformat(m).timestamp()))')
+
+if [ "$ESDIR" = no ]; then
+    if [ "$MOD" -gt $(( TS + 2 )) ]; then
+        anotar "NO BORRO en la nube (lo cambiaron despues desde otro dispositivo): $REL"
+        exit 0
+    fi
+    if rclone deletefile "onedrive:$REL" --log-level ERROR 2>>"$REGISTRO"; then
+        anotar "BORRADO EN LA NUBE: $REL"
+    else
+        anotar "no pude borrar en la nube: $REL"
+    fi
+    exit 0
+fi
+
+# carpeta
+N=$(rclone size "onedrive:$REL" --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["count"])' 2>/dev/null || echo 0)
+# ¿algo adentro cambio despues del borrado? entonces otro dispositivo sigue
+# trabajando ahi: no se borra, el lector trae lo nuevo.
+NUEVOS=$(rclone lsjson -R --files-only "onedrive:$REL" 2>/dev/null | python3 -c '
+import sys, json
+from datetime import datetime
+ts = int(sys.argv[1]); n = 0
+for d in json.load(sys.stdin):
+    m = d["ModTime"].replace("Z", "+00:00"); m = m[:26] + m[-6:] if "." in m and len(m) > 32 else m
+    if datetime.fromisoformat(m).timestamp() > ts + 2: n += 1
+print(n)' "$TS" 2>/dev/null || echo 0)
+if [ "${NUEVOS:-0}" -gt 0 ]; then
+    anotar "NO BORRO la carpeta en la nube ($NUEVOS archivos cambiaron despues desde otro dispositivo): $REL"
+    exit 0
+fi
+if [ "${N:-0}" -ge "$MAXBORRAR" ]; then
+    anotar "FRENADO: borrar «$REL» en la nube son $N archivos; pregunto"
+    /usr/local/bin/onedrive-borrados --pendiente-nube "$REL" "$N"
+    exit 0
+fi
+if rclone purge "onedrive:$REL" --log-level ERROR 2>>"$REGISTRO"; then
+    anotar "BORRADA EN LA NUBE carpeta ($N archivos): $REL"
+else
+    anotar "no pude borrar la carpeta en la nube: $REL"
+fi

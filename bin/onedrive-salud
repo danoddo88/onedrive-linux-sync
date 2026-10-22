@@ -34,7 +34,7 @@ problema() { PROBLEMAS+=("${1//\//_}|$2"); }   # clave|texto (sin barras: es nom
 for u in onedrive.service onedrive-delta.service onedrive-cola.service; do
     systemctl --user is-active --quiet "$u" || problema "serv-$u" "El servicio $u esta caido."
 done
-systemctl --user is-active --quiet onedrive-local.timer || problema "timer" "La revision horaria (onedrive-local.timer) esta apagada."
+systemctl --user is-active --quiet onedrive-local.timer || problema "timer" "La revision diaria (onedrive-local.timer) esta apagada."
 
 # 2. montaje
 if ! timeout 20 ls "$HOME/OneDrive" >/dev/null 2>&1; then
@@ -70,7 +70,7 @@ if [ -s "$CONF/fijadas.conf" ] && [ -f "$CONF/historial-local.log" ]; then
     if [ -n "$ULT" ] && [ ! -s "$CONF/en-curso.conf" ]; then
         F=$(sed -n "${ULT}p" "$CONF/historial-local.log" | grep -oE "^[0-9/]+ [0-9:]+")
         T=$(date -d "${F//\//-}" +%s 2>/dev/null || echo 0)
-        [ $(( $(date +%s) - T )) -gt 10800 ] && problema "revision-vieja" "Hace mas de 3 horas que ninguna revision horaria termina bien."
+        [ $(( $(date +%s) - T )) -gt 93600 ] && problema "revision-vieja" "Hace mas de 26 horas que ninguna revision completa termina bien."
     fi
 fi
 

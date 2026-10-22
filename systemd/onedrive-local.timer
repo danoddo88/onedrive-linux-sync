@@ -1,9 +1,8 @@
 [Unit]
-Description=Revisar cada hora (red de seguridad; lo inmediato lo hace onedrive-delta) las carpetas guardadas en esta PC
+Description=Revision completa diaria de las carpetas guardadas (red de seguridad; lo inmediato lo hacen onedrive-delta y onedrive-cola)
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=1h
+OnCalendar=*-*-* 04:30:00
 Persistent=true
 
 [Install]

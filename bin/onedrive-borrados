@@ -59,6 +59,8 @@ def sin_hijos(items):
 
 def contar(items):
     archivos = carpetas = 0
+    if any("n" in it for it in items):          # borrados locales: el conteo viene de la nube
+        return sum(int(it.get("n", 0)) for it in items), sum(1 for it in items if it.get("carpeta"))
     for it in sin_hijos(items):
         p = f"{LOCAL}/{it['ruta']}"
         if it.get("carpeta"):
@@ -92,6 +94,16 @@ def quitar(archivo):
 
 def borrar(archivo, p):
     n = 0
+    if p.get("lado") == "nube":                 # se borro en esta PC: borrar tambien en la nube
+        for it in p["items"]:
+            cmd = ["rclone", "purge" if it.get("carpeta") else "deletefile", f"onedrive:{it['ruta']}", "--log-level", "ERROR"]
+            if subprocess.run(cmd).returncode == 0:
+                n += 1
+            else:
+                anotar(f"no pude borrar en la nube {it['ruta']}")
+        quitar(archivo)
+        anotar(f"DECISION borrar en la nube: {n} elementos de «{p['carpeta']}»")
+        return
     for it in p["items"]:
         d = f"{LOCAL}/{it['ruta']}"
         if not d.startswith(LOCAL + "/") or it["ruta"] == p["carpeta"]:
@@ -107,6 +119,17 @@ def borrar(archivo, p):
 
 def restaurar(archivo, p):
     n = 0
+    if p.get("lado") == "nube":                 # se borro en esta PC: volver a bajarlo de la nube
+        for it in p["items"]:
+            cmd = ["rclone", "copy" if it.get("carpeta") else "copyto", f"onedrive:{it['ruta']}", f"{LOCAL}/{it['ruta']}",
+                   "--transfers", "8", "--tpslimit", "12", "--log-level", "ERROR"]
+            if subprocess.run(cmd).returncode == 0:
+                n += 1
+            else:
+                anotar(f"no pude restaurar aca {it['ruta']}")
+        quitar(archivo)
+        anotar(f"DECISION restaurar aca: {n} elementos de «{p['carpeta']}» bajados de nuevo")
+        return
     for it in p["items"]:
         d = f"{LOCAL}/{it['ruta']}"
         if not os.path.lexists(d):
@@ -149,13 +172,17 @@ def preguntar(archivo, p):
         return
     try:
         a, c = contar(p["items"])
+        if p.get("lado") == "nube":
+            texto = ("En esta PC se borraron <b>{} archivos</b>{} de\n«{}».\n\n"
+                     "La nube todavia los tiene. ¿Que hago?".format(a, f" y {c} carpetas" if c else "", p["carpeta"]))
+            botones = ["--ok-label=Borrarlos también en la nube", "--cancel-label=Restaurarlos acá"]
+        else:
+            texto = ("En la nube se borraron <b>{} archivos</b>{} de\n«{}», desde otro dispositivo.\n\n"
+                     "Esta PC todavia tiene su copia. ¿Que hago?".format(a, f" y {c} carpetas" if c else "", p["carpeta"]))
+            botones = ["--ok-label=Borrarlos también acá", "--cancel-label=Restaurarlos en la nube"]
         r = subprocess.run(
             ["zenity", "--question", "--width=520", "--title=OneDrive: se borraron muchos archivos",
-             "--text=En la nube se borraron <b>{} archivos</b>{} de\n«{}», desde otro dispositivo.\n\n"
-             "Esta PC todavia tiene su copia. ¿Que hago?".format(
-                 a, f" y {c} carpetas" if c else "", p["carpeta"]),
-             "--ok-label=Borrarlos también acá", "--cancel-label=Restaurarlos en la nube",
-             "--extra-button=Decidir después"], capture_output=True, text=True)
+             "--text=" + texto] + botones + ["--extra-button=Decidir después"], capture_output=True, text=True)
         if r.returncode == 0:
             borrar(archivo, p)
         elif r.stdout.strip() == "Decidir después" or r.returncode > 1:
@@ -167,9 +194,25 @@ def preguntar(archivo, p):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("--preguntar", "--lista", "--borrar", "--restaurar"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("--preguntar", "--lista", "--borrar", "--restaurar", "--pendiente-nube"):
         print(__doc__); return
     modo = sys.argv[1]
+    if modo == "--pendiente-nube":              # lo llama onedrive-borrar-uno: carpeta grande borrada en esta PC
+        ruta, n = sys.argv[2], int(sys.argv[3])
+        fij = next((f for f in open(f"{CONF}/fijadas.conf").read().split("\n") if f and (ruta == f or ruta.startswith(f + "/"))), ruta)
+        archivo = archivo_de(fij)
+        try:
+            with open(archivo) as f:
+                p = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            p = {"carpeta": fij, "lado": "nube", "creado": time.strftime("%F %T"), "items": []}
+        if not any(it["ruta"] == ruta for it in p["items"]):
+            p["items"].append({"id": "", "ruta": ruta, "carpeta": True, "n": n})
+        with open(archivo + ".tmp", "w") as f:
+            json.dump(p, f)
+        os.replace(archivo + ".tmp", archivo)
+        subprocess.Popen([sys.argv[0], "--preguntar", archivo], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
     lista = pendientes()
     if len(sys.argv) > 2:
         lista = [x for x in lista if x[0] == os.path.abspath(sys.argv[2])]
