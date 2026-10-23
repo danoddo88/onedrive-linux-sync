@@ -25,7 +25,7 @@ REGISTRO="$CONF/historial-local.log"
 mkdir -p "$CONF" "$LOCAL"; touch "$FIJADAS"
 
 grafico() { [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null; }
-aviso()   { grafico && notify-send -i folder-download "OneDrive" "$1" 2>/dev/null; echo "$1"; }
+aviso()   { grafico && notify-send -t 3000 -i folder-download "OneDrive" "$1" 2>/dev/null; echo "$1"; }
 error()   { grafico && zenity --error --width=440 --text="$1" 2>/dev/null; echo "ERROR: $1" >&2; exit 1; }
 anotar()  { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
 

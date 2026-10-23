@@ -91,7 +91,7 @@ anotar "cola iniciada (hasta $PARALELO subidas en paralelo)"
           if ! grep -qxF "$REL" "$HOME/.config/onedrive-sync/nombres-prohibidos.txt" 2>/dev/null; then
               printf "%s\n" "$REL" >> "$HOME/.config/onedrive-sync/nombres-prohibidos.txt"
               anotar "NO SUBO (nombre prohibido por OneDrive): $REL"
-              DISPLAY="${DISPLAY:-:0}" notify-send -u critical -i dialog-warning "OneDrive: nombre no permitido" "No se puede subir «$(basename "$REL")»: OneDrive no acepta \" * : < > ? | ni espacio o punto al final. Renombralo." 2>/dev/null
+              DISPLAY="${DISPLAY:-:0}" notify-send -u normal -t 3000 -i dialog-warning "OneDrive: nombre no permitido" "No se puede subir «$(basename "$REL")»: OneDrive no acepta \" * : < > ? | ni espacio o punto al final. Renombralo." 2>/dev/null
           fi
           continue
       fi

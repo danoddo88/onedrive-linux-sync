@@ -19,7 +19,7 @@ REGISTRO="$CONF/historial.log"
 mkdir -p "$CONF"; touch "$LISTA"
 
 grafico() { [ -n "${DISPLAY:-}" ] && command -v zenity >/dev/null; }
-aviso()   { grafico && notify-send -i folder-remote "OneDrive" "$1" 2>/dev/null; echo "$1"; }
+aviso()   { grafico && notify-send -t 3000 -i folder-remote "OneDrive" "$1" 2>/dev/null; echo "$1"; }
 error()   { grafico && zenity --error --text="$1" --width=400 2>/dev/null; echo "ERROR: $1" >&2; exit 1; }
 anotar()  { echo "$(date "+%F %T")  $*" >> "$REGISTRO"; }
 

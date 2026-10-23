@@ -104,7 +104,7 @@ for p in "${PROBLEMAS[@]}"; do
     if [ $(( AHORA - ULT )) -ge 3600 ]; then
         echo "$AHORA" > "$ESTADO/$K"
         echo "$(date '+%F %T')  PROBLEMA: $TXT" >> "$REG"
-        notify-send -u critical -i dialog-error "OneDrive: algo dejo de funcionar" "$TXT" 2>/dev/null
+        notify-send -u normal -t 3000 -i dialog-error "OneDrive: algo dejo de funcionar" "$TXT" 2>/dev/null
     fi
     echo "PROBLEMA: $TXT"
 done
@@ -115,7 +115,7 @@ for f in "$ESTADO"/*; do
     printf "%s\n" "${ACTIVOS[@]}" | grep -qx "$K" && continue
     rm -f "$f"
     echo "$(date '+%F %T')  RESUELTO: $K" >> "$REG"
-    notify-send -u normal -i emblem-default "OneDrive" "Se arreglo: $K" 2>/dev/null
+    notify-send -u normal -t 3000 -i emblem-default "OneDrive" "Se arreglo: $K" 2>/dev/null
 done
 [ ${#PROBLEMAS[@]} -eq 0 ] && echo "OneDrive: todo en orden ($(date '+%H:%M'))"
 
